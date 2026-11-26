@@ -310,3 +310,40 @@ async def test_browser_without_devtools_endpoint_fails_clearly(manager):
         await manager.open("alpha", None)
     assert "--no-sandbox" in str(excinfo.value) and stopped == [True]
     assert not manager.is_open("alpha")
+
+
+async def test_open_browsers_stay_within_the_concurrency_limit(manager):
+    closed = []
+
+    class Part:
+        def __init__(self, account_id):
+            self.account_id = account_id
+
+        async def close(self):
+            closed.append(self.account_id)
+
+        async def stop(self):
+            pass
+
+    class Launched:
+        def stop(self):
+            pass
+
+    def session(account_id, last_used):
+        return type(
+            "Session",
+            (),
+            {"account_id": account_id, "last_used": last_used, "browser": Part(account_id), "playwright": Part(account_id), "launched": Launched()},
+        )()
+
+    assert manager.settings.max_concurrent_jobs == 2
+    manager._sessions = {"old": session("old", 1.0), "new": session("new", 2.0)}
+    await manager._make_room("third")
+    assert closed == ["old"] and set(manager._sessions) == {"new"}
+
+    # A browser in use (its account lock held) is never closed for room.
+    manager._sessions = {"busy": session("busy", 1.0), "idle": session("idle", 2.0)}
+    closed.clear()
+    async with manager._account_lock("busy"):
+        await manager._make_room("third")
+    assert closed == ["idle"] and set(manager._sessions) == {"busy"}

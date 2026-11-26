@@ -261,6 +261,7 @@ class BrowserManager:
         if self._closed:
             raise BrowserError("browser manager is closed")
 
+        await self._make_room(account_id)
         profile = await asyncio.to_thread(self._open_or_create_profile, account_id, profile_id)
         launched = await asyncio.to_thread(
             self.sdk.launch,
@@ -345,6 +346,25 @@ class BrowserManager:
         self._closed = True
         for account_id in list(self._sessions):
             await self.close(account_id)
+
+    async def _make_room(self, account_id: str) -> None:
+        """Keep at most max_concurrent_jobs browsers open (each takes about
+        1 GB) by closing the least recently used idle ones first."""
+        limit = max(1, self.settings.max_concurrent_jobs)
+        idle = sorted(
+            (session for other, session in self._sessions.items() if other != account_id),
+            key=lambda session: session.last_used,
+        )
+        for session in idle:
+            if len(self._sessions) < limit:
+                return
+            lock = self._account_lock(session.account_id)
+            if lock.locked():
+                continue  # in use for a submission or login
+            async with lock:  # free, so this acquires without waiting
+                if self._sessions.get(session.account_id) is session:
+                    log.info("closing idle browser for %s to stay within %d open", session.account_id, limit)
+                    await self.close(session.account_id)
 
     async def close_idle(self) -> None:
         cutoff = time.time() - self.settings.browser_idle_seconds

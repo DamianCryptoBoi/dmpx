@@ -194,18 +194,20 @@ Cloudflare terminates HTTPS, and no port is open to the internet. Only the
 
 ### Sizing
 
-A submission opens one Chromium (~0.5 GB, most of a CPU core for about a
-minute); rendering happens upstream and is only polled over HTTP. Each account
-runs one generation at a time, so N simultaneous generations need N accounts.
+Measured on a 2 vCPU / 4 GB VPS: one browser on Dreamina's page takes about
+1.1 GB of RAM and more than one CPU core while the page loads. Rendering
+happens upstream and is only polled over HTTP. Each account runs one
+generation at a time, so N simultaneous generations need N accounts.
+
+At most `DREAMINA_MAX_CONCURRENT_JOBS` browsers are open at once: opening
+another first closes the least recently used idle one. Memory therefore
+stays near `1.1 GB × DREAMINA_MAX_CONCURRENT_JOBS` plus ~0.3 GB however
+many accounts you add.
 
 | Server | Setting | Result |
 |---|---|---|
-| 2 vCPU / 4 GB | `DREAMINA_MAX_CONCURRENT_JOBS=2` (default) | Up to 4 accounts rendering at once; submissions run two at a time, so the 3rd and 4th start about a minute later |
+| 2 vCPU / 4 GB | `DREAMINA_MAX_CONCURRENT_JOBS=2` (default) | Two submissions at a time; with four accounts all four render at once, the 3rd and 4th starting about a minute later |
 | 4 vCPU / 8 GB | `DREAMINA_MAX_CONCURRENT_JOBS=4` | Four submissions at once |
-
-Browsers stay open for `DREAMINA_BROWSER_IDLE_SECONDS` (600) after a job so
-the next one starts faster; on 4 GB with four or more accounts, lower it
-to 120.
 
 ## Deploy without Docker (Ubuntu/Debian x86_64)
 
