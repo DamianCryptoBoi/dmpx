@@ -1,0 +1,8 @@
+.env
+.auth/
+.shardx/
+.venv/
+__pycache__/
+.env.lock
+.data/
+.pytest_cache/

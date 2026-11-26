@@ -1,0 +1,37 @@
+[project]
+name = "dreamina-proxy"
+version = "0.1.0"
+description = "Multi-account Dreamina video generation API with an admin dashboard"
+readme = "README.md"
+requires-python = ">=3.12"
+# Exact pins: the browser automation was verified against these versions.
+dependencies = [
+    "fastapi==0.165.0",
+    "starlette==1.10.0",
+    "uvicorn==0.54.0",
+    "httpx==0.28.1",
+    "jinja2==3.1.6",
+    "python-multipart==0.0.34",
+    "patchright==1.64.4",
+    "shardx==2.1.7",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
+]
+
+[tool.uv]
+# An application, not a library: install dependencies only.
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    "ignore::DeprecationWarning:fastapi.testclient",
+    "ignore:Using `httpx` with `starlette.testclient`",
+]

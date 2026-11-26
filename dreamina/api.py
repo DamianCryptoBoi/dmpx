@@ -1,0 +1,356 @@
+"""Worker-facing /v1 API and the public health check."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+import sqlite3
+import uuid
+from typing import Any
+
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import FileResponse, JSONResponse
+from starlette.datastructures import FormData, UploadFile
+from starlette.formparsers import MultiPartException
+
+from .accounts import AccountError
+from .catalog import PRICES, ValidationError, estimate_credits, get_model, public_catalog, validate_generation
+from .db import now_iso
+from .jobs import media_available
+from .media import UploadError, save_upload
+from .security import api_key_matches, bearer_token
+
+MAX_FORM_FIELDS = 20
+MAX_TEXT_PART_BYTES = 256 * 1024
+
+
+class ApiError(Exception):
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+def error_response(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+def services(request: Request) -> Any:
+    return request.app.state.services
+
+
+def require_api_key(request: Request) -> None:
+    settings = services(request).settings
+    if not settings.api_key:
+        raise ApiError(503, "api_disabled", "DREAMINA_API_KEY is not configured")
+    if not api_key_matches(bearer_token(request.headers.get("authorization")), settings.api_key):
+        raise ApiError(401, "unauthorized", "missing or invalid API key")
+
+
+# generation creation (shared with the dashboard) -----------------------------
+def _uploads(form: FormData, name: str) -> list[UploadFile]:
+    items = form.getlist(name)
+    files = [item for item in items if isinstance(item, UploadFile)]
+    if len(files) != len(items):
+        raise ApiError(400, "invalid_input", f"{name} must be file uploads")
+    return [item for item in files if item.filename]
+
+
+def _one_upload(form: FormData, name: str) -> UploadFile | None:
+    files = _uploads(form, name)
+    if len(files) > 1:
+        raise ApiError(400, "invalid_input", f"only one {name} is allowed")
+    return files[0] if files else None
+
+
+def _text(form: FormData, name: str) -> str:
+    value = form.get(name)
+    if isinstance(value, UploadFile):
+        raise ApiError(400, "invalid_input", f"{name} must be a text field")
+    return (value or "").strip()
+
+
+async def read_form(request: Request, *, max_files: int = 64, max_fields: int = MAX_FORM_FIELDS) -> FormData:
+    settings = services(request).settings
+    length = request.headers.get("content-length")
+    if length and length.isdigit() and int(length) > settings.max_request_bytes:
+        raise ApiError(413, "invalid_input", f"request exceeds {settings.max_request_bytes} bytes")
+    try:
+        return await request.form(max_files=max_files, max_fields=max_fields, max_part_size=MAX_TEXT_PART_BYTES)
+    except MultiPartException as exc:
+        raise ApiError(400, "invalid_input", f"malformed form: {exc.message}") from exc
+
+
+async def create_generation(svc: Any, form: FormData, idempotency_key: str | None) -> tuple[dict[str, Any], bool]:
+    """Validate, store, and enqueue a generation. Returns (job, created)."""
+    key = (idempotency_key or "").strip()
+    if not key:
+        raise ApiError(400, "invalid_input", "Idempotency-Key header is required")
+    if len(key) > 200:
+        raise ApiError(400, "invalid_input", "Idempotency-Key must be at most 200 characters")
+
+    model = _text(form, "model")
+    prompt = _text(form, "prompt")
+    resolution = _text(form, "resolution")
+    aspect_ratio = _text(form, "aspect_ratio") or None
+    raw_duration = _text(form, "duration_seconds")
+    try:
+        duration = int(raw_duration)
+    except ValueError as exc:
+        raise ApiError(400, "invalid_input", "duration_seconds must be an integer") from exc
+    images = _uploads(form, "images")
+    audio = _uploads(form, "audio")
+    first_frame = _one_upload(form, "first_frame")
+    last_frame = _one_upload(form, "last_frame")
+
+    def validate(image_paths, audio_paths, first, last):
+        try:
+            return validate_generation(
+                model_name=model,
+                prompt=prompt,
+                duration_seconds=duration,
+                resolution=resolution,
+                aspect_ratio=aspect_ratio,
+                images=image_paths,
+                audio=audio_paths,
+                first_frame=first,
+                last_frame=last,
+            )
+        except ValidationError as exc:
+            raise ApiError(400, "invalid_input", str(exc)) from exc
+
+    # Counts, tokens, and settings are checked before anything touches disk.
+    validate(
+        [f.filename for f in images],
+        [f.filename for f in audio],
+        first_frame.filename if first_frame else None,
+        last_frame.filename if last_frame else None,
+    )
+
+    settings = svc.settings
+    job_id = uuid.uuid4().hex
+    job_dir = settings.jobs_dir / job_id
+    inputs = job_dir / "inputs"
+    hashes: dict[str, Any] = {"images": [], "audio": [], "first_frame": None, "last_frame": None}
+    try:
+        image_paths = []
+        for index, upload in enumerate(images, 1):
+            path, _mime, _size, digest = await save_upload(
+                upload, inputs / f"image{index}", kind="image", max_bytes=settings.max_image_bytes
+            )
+            image_paths.append(str(path))
+            hashes["images"].append(digest)
+        audio_paths = []
+        for index, upload in enumerate(audio, 1):
+            path, _mime, _size, digest = await save_upload(
+                upload, inputs / f"audio{index}", kind="audio", max_bytes=settings.max_audio_bytes
+            )
+            audio_paths.append(str(path))
+            hashes["audio"].append(digest)
+        frame_paths: dict[str, str | None] = {"first_frame": None, "last_frame": None}
+        for name, upload in (("first_frame", first_frame), ("last_frame", last_frame)):
+            if upload:
+                path, _mime, _size, digest = await save_upload(
+                    upload, inputs / name, kind="image", max_bytes=settings.max_image_bytes
+                )
+                frame_paths[name] = str(path)
+                hashes[name] = digest
+    except UploadError as exc:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise ApiError(400, "invalid_input", str(exc)) from exc
+    except BaseException:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+
+    spec = validate(image_paths, audio_paths, frame_paths["first_frame"], frame_paths["last_frame"])
+    canonical = {
+        "model": spec.model.name,
+        "prompt": spec.prompt,
+        "duration_seconds": spec.duration_seconds,
+        "resolution": spec.resolution,
+        "aspect_ratio": spec.aspect_ratio,
+        "files": hashes,
+    }
+    request_hash = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def replay() -> tuple[dict[str, Any], bool]:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        existing = svc.db.get_job_by_idempotency(key)
+        if existing["request_hash"] != request_hash:
+            raise ApiError(409, "idempotency_conflict", "Idempotency-Key was already used for a different request")
+        return existing, False
+
+    if svc.db.get_job_by_idempotency(key):
+        return replay()
+    try:
+        svc.accounts.check_capacity(spec.estimate_credits)
+    except AccountError as exc:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise ApiError(exc.status, exc.code, exc.message) from exc
+
+    try:
+        svc.db.create_job(
+            {
+                "id": job_id,
+                "idempotency_key": key,
+                "request_hash": request_hash,
+                "model": spec.model.name,
+                "prompt": spec.prompt,
+                "duration_seconds": spec.duration_seconds,
+                "resolution": spec.resolution,
+                "aspect_ratio": spec.aspect_ratio,
+                "mode": spec.mode,
+                "images": image_paths,
+                "audio": audio_paths,
+                "first_frame_path": frame_paths["first_frame"],
+                "last_frame_path": frame_paths["last_frame"],
+                "status": "queued",
+                "request": {"credits_estimate": spec.estimate_credits, "files": hashes},
+                "created_at": now_iso(),
+            }
+        )
+    except sqlite3.IntegrityError:
+        return replay()
+    svc.queue.wake()
+    return svc.db.get_job(job_id), True
+
+
+# representations ---------------------------------------------------------------
+def public_job(job: dict[str, Any], *, base: str = "/v1/generations") -> dict[str, Any]:
+    try:
+        estimate = estimate_credits(get_model(job["model"]), int(job["duration_seconds"]), job["resolution"])
+    except ValidationError:
+        estimate = None
+    media = None
+    if job["status"] == "succeeded":
+        if media_available(job):
+            media = "ready"
+        elif job["output_path"]:
+            media = "expired"
+        else:
+            media = "pending"
+    error = None
+    if job["status"] == "failed":
+        error = {"code": job["error_code"] or "upstream_rejected", "message": job["error_message"] or ""}
+    return {
+        "id": job["id"],
+        "status": job["status"],
+        "model": job["model"],
+        "prompt": job["prompt"],
+        "duration_seconds": job["duration_seconds"],
+        "resolution": job["resolution"],
+        "aspect_ratio": job["aspect_ratio"],
+        "mode": job["mode"],
+        "references": {
+            "images": len(job["images_json"]),
+            "audio": len(job["audio_json"]),
+            "first_frame": bool(job["first_frame_path"]),
+            "last_frame": bool(job["last_frame_path"]),
+        },
+        "account_id": job["account_id"],
+        "submit_id": job["submit_id"],
+        "credits_estimate": estimate,
+        "credits_used": job["credits_used"],
+        "media": media,
+        "content_url": f"{base}/{job['id']}/content" if media == "ready" else None,
+        "error": error,
+        "notes": job["error_message"] if job["status"] != "failed" else None,
+        "created_at": job["created_at"],
+        "started_at": job["started_at"],
+        "finished_at": job["finished_at"],
+    }
+
+
+def media_response(job: dict[str, Any] | None) -> FileResponse:
+    if job is None:
+        raise ApiError(404, "not_found", "generation not found")
+    if job["status"] != "succeeded":
+        raise ApiError(409, "not_ready", f"generation is {job['status']}")
+    path = media_available(job)
+    if path is None:
+        if job["output_path"]:
+            raise ApiError(410, "media_expired", "the video was removed by the retention policy")
+        raise ApiError(409, "not_ready", "the video is still downloading")
+    return FileResponse(path, media_type="video/mp4", filename=f"{job['id']}.mp4")
+
+
+def credit_summary(svc: Any) -> dict[str, Any]:
+    accounts = svc.accounts.list()
+    usable = {account["id"] for account in svc.accounts.usable()}
+    return {
+        "total_available": sum(account["credits"] or 0 for account in accounts if account["id"] in usable),
+        "accounts": [
+            {
+                "id": account["id"],
+                "label": account["label"],
+                "state": account["state"],
+                "busy": account["busy"],
+                "credits": account["credits"],
+                "credits_updated_at": account["credits_updated_at"],
+            }
+            for account in accounts
+        ],
+    }
+
+
+# routes -------------------------------------------------------------------------
+router = APIRouter()
+v1 = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
+
+
+@router.get("/health")
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
+@v1.get("/models")
+async def models() -> dict[str, Any]:
+    return {"models": public_catalog(), "pricing_source": PRICES.source, "pricing_updated_at": PRICES.updated_at}
+
+
+@v1.post("/generations")
+async def post_generation(request: Request) -> JSONResponse:
+    svc = services(request)
+    form = await read_form(request)
+    try:
+        job, created = await create_generation(svc, form, request.headers.get("idempotency-key"))
+    finally:
+        await form.close()
+    location = f"/v1/generations/{job['id']}"
+    return JSONResponse(public_job(job), status_code=202 if created else 200, headers={"Location": location})
+
+
+@v1.get("/generations")
+async def list_generations(request: Request, limit: int = 20, offset: int = 0, status: str | None = None):
+    svc = services(request)
+    limit = max(1, min(100, limit))
+    offset = max(0, offset)
+    if status and status not in {"queued", "submitting", "running", "succeeded", "failed"}:
+        raise ApiError(400, "invalid_input", "unknown status filter")
+    jobs = svc.db.list_jobs(limit=limit, offset=offset, status=status)
+    return {
+        "data": [public_job(job) for job in jobs],
+        "limit": limit,
+        "offset": offset,
+        "total": svc.db.count_jobs(status),
+    }
+
+
+@v1.get("/generations/{job_id}")
+async def get_generation(request: Request, job_id: str):
+    job = services(request).db.get_job(job_id)
+    if job is None:
+        raise ApiError(404, "not_found", "generation not found")
+    return public_job(job)
+
+
+@v1.get("/generations/{job_id}/content")
+async def get_generation_content(request: Request, job_id: str):
+    return media_response(services(request).db.get_job(job_id))
+
+
+@v1.get("/credits")
+async def credits(request: Request):
+    return credit_summary(services(request))

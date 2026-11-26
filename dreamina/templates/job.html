@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% from "_macros.html" import badge %}
+{% block title %}Job {{ job.id[:10] }} · Dreamina proxy{% endblock %}
+{% block content %}
+<p><a href="/admin/jobs">← Jobs</a></p>
+<h1>Job <code>{{ job.id }}</code> {{ badge(job.status) }}</h1>
+<div {% if job.status in ["queued", "submitting", "running"] or job.media == "pending" %}data-refresh-seconds="10"{% endif %}></div>
+{% if job.error %}<p class="flash flash-error"><code>{{ job.error.code }}</code> {{ job.error.message }}</p>{% endif %}
+{% if job.notes %}<p class="flash flash-warn">{{ job.notes }}</p>{% endif %}
+<div class="detail">
+  <section class="card">
+    {% if job.media == "ready" %}
+      <video controls preload="metadata" src="{{ job.content_url }}"></video>
+      <p><a href="{{ job.content_url }}" download>Download MP4</a></p>
+    {% elif job.media == "expired" %}
+      <p class="muted">The video was removed by the retention policy.</p>
+    {% elif job.media == "pending" %}
+      <p class="muted">Generation finished; the video is downloading.</p>
+    {% else %}
+      <p class="muted">No video yet.</p>
+    {% endif %}
+  </section>
+  <section class="card">
+    <dl class="facts">
+      <dt>Model</dt><dd>{{ job.model }}</dd>
+      <dt>Mode</dt><dd>{{ "First / last frame" if job.mode == "first_last" else "Unified references" }}</dd>
+      <dt>Settings</dt><dd>{{ job.duration_seconds }}s · {{ job.resolution }} · {{ job.aspect_ratio }}</dd>
+      <dt>References</dt><dd>{{ job.references.images }} images · {{ job.references.audio }} audio{% if job.references.first_frame %} · first frame{% endif %}{% if job.references.last_frame %} · last frame{% endif %}</dd>
+      <dt>Account</dt><dd>{{ job.account_id or "—" }}</dd>
+      <dt>Credits</dt><dd>{{ job.credits_used if job.credits_used is not none else "—" }} used · {{ job.credits_estimate }} estimated</dd>
+      <dt>Submit id</dt><dd><code>{{ job.submit_id or "—" }}</code></dd>
+      <dt>Created</dt><dd>{% if job.created_at %}<time datetime="{{ job.created_at }}">{{ job.created_at }}</time>{% else %}—{% endif %}</dd>
+      <dt>Started</dt><dd>{% if job.started_at %}<time datetime="{{ job.started_at }}">{{ job.started_at }}</time>{% else %}—{% endif %}</dd>
+      <dt>Finished</dt><dd>{% if job.finished_at %}<time datetime="{{ job.finished_at }}">{{ job.finished_at }}</time>{% else %}—{% endif %}</dd>
+    </dl>
+  </section>
+</div>
+<h2>Prompt</h2>
+<pre class="prompt">{{ job.prompt }}</pre>
+{% endblock %}

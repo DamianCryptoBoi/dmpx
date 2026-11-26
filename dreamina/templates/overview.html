@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from "_macros.html" import job_table, badge %}
+{% block title %}Overview · Dreamina proxy{% endblock %}
+{% block content %}
+<h1>Overview</h1>
+{% for warning in warnings %}<p class="flash flash-warn">{{ warning }}</p>{% endfor %}
+<section class="stats" data-status-url="/admin/status.json">
+  <div class="stat"><span class="label">Available credits</span><span class="value" data-stat="credits">{{ stats.credits }}</span></div>
+  <div class="stat"><span class="label">Ready accounts</span><span class="value"><span data-stat="accounts_ready">{{ stats.accounts_ready }}</span><small> / <span data-stat="accounts_total">{{ stats.accounts_total }}</span></small></span></div>
+  <div class="stat"><span class="label">Active jobs</span><span class="value" data-stat="active">{{ stats.active }}</span></div>
+  <div class="stat"><span class="label">Queued</span><span class="value" data-stat="queued">{{ stats.queued }}</span></div>
+  <div class="stat"><span class="label">Succeeded</span><span class="value" data-stat="succeeded">{{ stats.succeeded }}</span></div>
+  <div class="stat"><span class="label">Failed</span><span class="value" data-stat="failed">{{ stats.failed }}</span></div>
+</section>
+<h2>Recent jobs</h2>
+{{ job_table(recent) }}
+{% if failures %}
+<h2>Recent failures</h2>
+<ul class="failures">
+  {% for job in failures %}
+  <li><a href="/admin/jobs/{{ job.id }}"><code>{{ job.id[:10] }}</code></a> <code>{{ job.error.code }}</code> <span class="muted">{{ job.error.message }}</span></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

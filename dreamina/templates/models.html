@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Models · Dreamina proxy{% endblock %}
+{% block content %}
+<h1>Models</h1>
+<p class="muted">Prices are credits per second, {{ "read live from Dreamina at " ~ pricing_updated_at if pricing_source == "live" else "from the verified fallback table (live prices not fetched yet)" }}.</p>
+<div class="model-grid">
+{% for model in models %}
+  <section class="card">
+    <h2>{{ model.name }}</h2>
+    <p class="muted"><code>{{ model.dreamina_model_key }}</code></p>
+    <table>
+      <thead><tr><th>Resolution</th><th class="num">Per second</th><th class="num">4 s job</th></tr></thead>
+      <tbody>
+      {% for resolution, price in model.pricing_credits_per_second.items() %}
+        <tr><td>{{ resolution }}</td><td class="num">{{ price }}</td><td class="num">{{ price * 4 }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <dl class="facts">
+      <dt>Duration</dt><dd>{{ model.duration_seconds.min }}–{{ model.duration_seconds.max }} s</dd>
+      <dt>Images</dt><dd>up to {{ model.reference_limits.images }}</dd>
+      <dt>Audio</dt><dd>up to {{ model.reference_limits.audio }} · {{ model.reference_limits.audio_seconds }} s each</dd>
+      <dt>Prompt</dt><dd>{{ model.reference_limits.prompt_chars }} characters</dd>
+    </dl>
+  </section>
+{% endfor %}
+</div>
+{% endblock %}

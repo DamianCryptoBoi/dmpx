@@ -1,0 +1,26 @@
+{% macro badge(value) -%}
+<span class="badge badge-{{ value }}">{{ value | replace("_", " ") }}</span>
+{%- endmacro %}
+
+{% macro job_table(jobs) -%}
+<div class="table-wrap">
+<table>
+  <thead><tr><th>Job</th><th>Status</th><th>Model</th><th>Settings</th><th>Account</th><th class="num">Credits</th><th>Created</th></tr></thead>
+  <tbody>
+  {% for job in jobs %}
+    <tr>
+      <td><a href="/admin/jobs/{{ job.id }}"><code>{{ job.id[:10] }}</code></a></td>
+      <td>{{ badge(job.status) }}</td>
+      <td>{{ job.model }}</td>
+      <td class="muted">{{ job.duration_seconds }}s · {{ job.resolution }} · {{ job.aspect_ratio }}</td>
+      <td>{{ job.account_id or "—" }}</td>
+      <td class="num">{{ job.credits_used if job.credits_used is not none else "~" ~ (job.credits_estimate or "?") }}</td>
+      <td class="muted"><time datetime="{{ job.created_at }}">{{ job.created_at }}</time></td>
+    </tr>
+  {% else %}
+    <tr><td colspan="7" class="empty">No jobs yet.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{%- endmacro %}

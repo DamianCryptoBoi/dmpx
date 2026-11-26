@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Sign in · Dreamina proxy{% endblock %}
+{% block body %}
+<main class="login">
+  <form method="post" action="/admin/login" class="card stack">
+    <h1>Dreamina proxy</h1>
+    {% if disabled %}
+      <p class="flash flash-error">Admin login is disabled. Run <code>scripts/setup_admin.py</code> to set <code>ADMIN_PASSWORD_HASH</code>.</p>
+    {% endif %}
+    {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+    <label>Password
+      <input type="password" name="password" autocomplete="current-password" required autofocus {% if disabled %}disabled{% endif %}>
+    </label>
+    <button type="submit" {% if disabled %}disabled{% endif %}>Sign in</button>
+  </form>
+</main>
+{% endblock %}
