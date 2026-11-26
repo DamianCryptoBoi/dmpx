@@ -1,0 +1,23 @@
+# Only dreamina/, scripts/ and the uv manifests are needed in the image.
+.git/
+.github/
+.vscode/
+.idea/
+.venv/
+**/__pycache__/
+.pytest_cache/
+.data/
+.shardx/
+.auth/
+data/
+docs/
+tests/
+*.md
+ecosystem.config.cjs
+
+# secrets: never in the build context
+.env
+.env.*
+!.env.example
+*.pem
+*.key

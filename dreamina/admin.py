@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
 import uuid
 from pathlib import Path
 from typing import Any
@@ -24,12 +26,28 @@ class LoginRequired(Exception):
     pass
 
 
-def client_ip(request: Request) -> str:
+async def client_ip(request: Request) -> str:
     host = request.client.host if request.client else "unknown"
-    # cloudflared connects from loopback; only then is the header trustworthy.
-    if host in {"127.0.0.1", "::1"}:
+    # Only cloudflared may set the client address: it connects from loopback
+    # (host install) or from a configured proxy such as its container.
+    if host in {"127.0.0.1", "::1"} or host in await proxy_addresses(services(request).settings.trusted_proxies):
         return request.headers.get("cf-connecting-ip", host)
     return host
+
+
+async def proxy_addresses(names: tuple[str, ...]) -> set[str]:
+    """Resolve on every call: container addresses change when they restart."""
+
+    def resolve() -> set[str]:
+        found: set[str] = set()
+        for name in names:
+            try:
+                found.update(info[4][0] for info in socket.getaddrinfo(name, None))
+            except OSError:
+                pass
+        return found
+
+    return await asyncio.to_thread(resolve) if names else set()
 
 
 def session(request: Request) -> dict[str, Any]:
@@ -85,7 +103,7 @@ async def login_page(request: Request):
 async def login(request: Request):
     svc = services(request)
     disabled = not svc.settings.admin_password_hash
-    ip = client_ip(request)
+    ip = await client_ip(request)
     # Unauthenticated: accept no file parts, so nothing is spooled to disk.
     form = await read_form(request, max_files=0, max_fields=4)
     password = form.get("password")
@@ -292,7 +310,8 @@ async def job_page(request: Request, job_id: str):
 @router.get("/jobs/{job_id}/content")
 async def job_content(request: Request, job_id: str):
     session(request)
-    return media_response(services(request).db.get_job(job_id))
+    svc = services(request)
+    return await media_response(svc, svc.db.get_job(job_id), request.headers.get("range"))
 
 
 @router.get("/models", response_class=HTMLResponse)

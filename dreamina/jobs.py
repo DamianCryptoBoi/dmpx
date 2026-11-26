@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 import time
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from .catalog import PRICES, GenerationSpec, ValidationError, validate_generatio
 from .config import Settings
 from .db import Database, now_iso
 from .http_client import SessionExpired, UpstreamError, parse_history
-from .media import cleanup_inputs, cleanup_job_dirs, cleanup_media
+from .media import cleanup_inputs, cleanup_job_dirs
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,11 @@ class JobQueue:
 
     def recover(self) -> None:
         """Resume work after a restart without ever resubmitting a paid job."""
+        # Results are streamed from upstream, never stored; drop files an
+        # older version downloaded.
+        if self.settings.media_dir.exists():
+            shutil.rmtree(self.settings.media_dir, ignore_errors=True)
+            log.info("removed stored videos from %s", self.settings.media_dir)
         for job in self.db.jobs_with_status(["submitting", "running"]):
             if job["submit_id"] and job["account_id"]:
                 self.db.update_job(job["id"], status="running")
@@ -272,11 +278,9 @@ class JobQueue:
                         output_url=state.video_url,
                         finished_at=now_iso(),
                     )
-                    if state.video_url:
-                        await self._download(job_id, account_id, state.video_url)
-                    else:
-                        # Media recovery re-reads history until the URL appears.
-                        self.db.update_job(job_id, error_code="download_pending", error_message="video URL not available yet")
+                    if not state.video_url:
+                        # Maintenance re-reads history until the URL appears.
+                        self.db.update_job(job_id, error_code="media_pending", error_message="the video URL is not available yet")
                     await self._refresh_credits_quietly(account_id)
                     return
             if time.monotonic() >= deadline:
@@ -288,40 +292,23 @@ class JobQueue:
                 return
             await asyncio.sleep(self.settings.poll_interval_seconds)
 
-    async def _download(self, job_id: str, account_id: str, url: str) -> bool:
-        destination = self.settings.media_dir / f"{job_id}.mp4"
-        try:
-            async with self.accounts.client(self.accounts.get(account_id)) as client:
-                await client.download(url, destination)
-        except Exception as exc:
-            message = self.accounts.error_text(exc)
-            log.warning("download for job %s failed: %s", job_id, message)
-            self.db.update_job(job_id, error_code="download_pending", error_message=message)
-            return False
-        fields: dict[str, Any] = {"output_path": str(destination)}
-        if (self.db.get_job(job_id) or {}).get("error_code") == "download_pending":
-            fields.update(error_code=None, error_message=None)
-        self.db.update_job(job_id, **fields)
-        return True
-
-    async def _recover_media(self) -> None:
-        """Re-fetch results whose download never completed, via fresh history."""
+    async def _recover_urls(self) -> None:
+        """Re-read history for succeeded jobs whose video URL never appeared."""
         cutoff = time.time() - self.settings.media_retention_days * 86400
-        for job in self.db.jobs_with_missing_media():
+        for job in self.db.jobs_missing_output_url():
             if job["id"] in self._tasks or not job["account_id"] or not job["submit_id"]:
                 continue
-            if job["account_id"] in self.accounts.busy or _timestamp(job["finished_at"]) < cutoff:
+            if _timestamp(job["finished_at"]) < cutoff:
                 continue
             try:
                 async with self.accounts.client(self.accounts.get(job["account_id"])) as client:
                     record = await client.history_record(job["submit_id"])
             except Exception as exc:
-                log.info("media recovery lookup for %s failed: %s", job["id"], self.accounts.error_text(exc))
+                log.info("video URL lookup for %s failed: %s", job["id"], self.accounts.error_text(exc))
                 continue
             url = parse_history(record).video_url if record else None
             if url:
-                self.db.update_job(job["id"], output_url=url)
-                await self._download(job["id"], job["account_id"], url)
+                self.db.update_job(job["id"], output_url=url, error_code=None, error_message=None)
 
     def _fail(self, job_id: str, code: str, message: str) -> None:
         self.db.update_job(
@@ -352,14 +339,11 @@ class JobQueue:
 
     async def maintain(self) -> None:
         await self.browsers.close_idle()
-        removed = await asyncio.to_thread(cleanup_media, self.settings.media_dir, self.settings.media_retention_days)
-        if removed:
-            log.info("removed %d expired media files", removed)
         active = {job["id"] for job in self.db.jobs_with_status(["queued", "submitting", "running"])}
         await asyncio.to_thread(
             cleanup_job_dirs, self.settings.jobs_dir, self.settings.media_retention_days, active | set(self._tasks)
         )
-        await self._recover_media()
+        await self._recover_urls()
         now = time.monotonic()
         if now - self._last_price_refresh >= self.price_refresh_seconds:
             await self.refresh_prices()
@@ -387,10 +371,3 @@ def _timestamp(value: str | None) -> float:
         return datetime.fromisoformat(value).timestamp()
     except ValueError:
         return 0.0
-
-
-def media_available(job: dict[str, Any]) -> Path | None:
-    path = job.get("output_path")
-    if path and Path(path).is_file():
-        return Path(path)
-    return None

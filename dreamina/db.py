@@ -289,10 +289,11 @@ class Database:
             ).fetchall()
         return [self._decode_job(row) for row in rows]
 
-    def jobs_with_missing_media(self) -> list[dict[str, Any]]:
+    def jobs_missing_output_url(self) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM jobs WHERE status = 'succeeded' AND (output_path IS NULL OR output_path = '')"
+                "SELECT * FROM jobs WHERE status = 'succeeded' AND (output_url IS NULL OR output_url = '')"
+                " AND COALESCE(error_code, '') != 'media_expired'"
             ).fetchall()
         return [self._decode_job(row) for row in rows]
 

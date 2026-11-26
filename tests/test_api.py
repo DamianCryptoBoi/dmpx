@@ -300,3 +300,84 @@ def test_job_views_hide_internal_detail_from_api_clients(client, services):
     login(client)
     detail = client.get(f"/admin/jobs/{job['id']}").text
     assert "sub-123" in detail and "credentials are missing" in detail
+
+
+# streamed results ---------------------------------------------------------------------
+def finished(client, services, dreamina):
+    make_ready(services, "alpha")
+    dreamina.history["submit-1"] = SUCCESS
+    job = post(client).json()
+    return wait_status(client, job["id"], "succeeded")
+
+
+def test_content_is_streamed_and_never_stored(client, services, dreamina, cdn):
+    services.settings.media_dir.mkdir(parents=True, exist_ok=True)
+    (services.settings.media_dir / "old.mp4").write_bytes(b"left by an older version")
+    services.queue.recover()
+    assert not services.settings.media_dir.exists()
+
+    done = finished(client, services, dreamina)
+    response = client.get(done["content_url"], headers=AUTH)
+    assert response.status_code == 200 and response.content == cdn.body
+    assert response.headers["content-type"] == "video/mp4"
+    assert response.headers["content-length"] == str(len(cdn.body))
+    assert cdn.calls == [("https://cdn/x.mp4", None)] and cdn.closed == 1
+    stored = [p for p in services.settings.data_dir.rglob("*") if p.suffix in {".mp4", ".part"}]
+    assert stored == [] and not services.settings.media_dir.exists()
+
+
+def test_content_passes_byte_ranges_through(client, services, dreamina, cdn):
+    done = finished(client, services, dreamina)
+    response = client.get(done["content_url"], headers={**AUTH, "Range": "bytes=0-3"})
+    assert response.status_code == 206 and response.content == cdn.body[:4]
+    assert response.headers["content-range"] == f"bytes 0-3/{len(cdn.body)}"
+
+
+def test_expired_upstream_url_is_refreshed_from_history(client, services, dreamina, cdn):
+    done = finished(client, services, dreamina)
+    cdn.gone.add("https://cdn/x.mp4")
+    dreamina.history["submit-1"] = {**SUCCESS, "video_url": "https://cdn/fresh.mp4"}
+    response = client.get(done["content_url"], headers=AUTH)
+    assert response.status_code == 200 and response.content == cdn.body
+    assert cdn.calls[-1] == ("https://cdn/fresh.mp4", None)
+    assert services.db.get_job(done["id"])["output_url"] == "https://cdn/fresh.mp4"
+
+
+def test_video_gone_upstream_reports_expired(client, services, dreamina, cdn):
+    done = finished(client, services, dreamina)
+    cdn.gone.add("https://cdn/x.mp4")
+    dreamina.history.pop("submit-1")
+    response = client.get(done["content_url"], headers=AUTH)
+    assert response.status_code == 410 and response.json()["error"]["code"] == "media_expired"
+    view = client.get(f"/v1/generations/{done['id']}", headers=AUTH).json()
+    assert view["status"] == "succeeded" and view["media"] == "expired" and view["content_url"] is None
+
+
+def test_upstream_outage_is_retryable_not_expired(client, services, dreamina, cdn):
+    done = finished(client, services, dreamina)
+    cdn.down = True
+    response = client.get(done["content_url"], headers=AUTH)
+    assert response.status_code == 502 and response.json()["error"]["code"] == "upstream_unavailable"
+    cdn.down = False
+    assert client.get(done["content_url"], headers=AUTH).status_code == 200
+
+
+def test_login_throttle_uses_client_ip_only_from_trusted_proxy(settings, services):
+    services.settings = dataclasses.replace(settings, trusted_proxies=("10.0.0.5",))
+    app = create_app(services.settings, services=services)
+
+    def attempts(peer, forwarded, count):
+        # No `with`: skip the lifespan, which would close the shared database.
+        client = TestClient(app, follow_redirects=False, client=(peer, 40000))
+        return [
+            client.post("/admin/login", data={"password": "wrong"}, headers={"CF-Connecting-IP": forwarded}).text
+            for _ in range(count)
+        ]
+
+    # Behind the trusted proxy, each visitor is throttled separately.
+    assert "Too many" in attempts("10.0.0.5", "198.51.100.1", 6)[-1]
+    assert "Too many" not in attempts("10.0.0.5", "198.51.100.2", 1)[-1]
+    # Anyone else cannot pick a fresh address by sending the header.
+    for forged in ("203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4", "203.0.113.5"):
+        attempts("10.0.0.9", forged, 1)
+    assert "Too many" in attempts("10.0.0.9", "203.0.113.6", 1)[-1]

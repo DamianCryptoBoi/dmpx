@@ -11,14 +11,16 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException
 
 from .accounts import AccountError
 from .catalog import PRICES, ValidationError, estimate_credits, get_model, public_catalog, validate_generation
 from .db import now_iso
-from .jobs import media_available
+from . import http_client
+from .http_client import UpstreamError, parse_history
 from .media import UploadError, save_upload
 from .security import api_key_matches, bearer_token
 
@@ -241,10 +243,10 @@ def public_job(job: dict[str, Any], *, base: str = "/v1/generations", internal: 
         estimate = None
     media = None
     if job["status"] == "succeeded":
-        if media_available(job):
-            media = "ready"
-        elif job["output_path"]:
+        if job["error_code"] == "media_expired":
             media = "expired"
+        elif job["output_url"]:
+            media = "ready"
         else:
             media = "pending"
     error = None
@@ -285,17 +287,64 @@ def public_job(job: dict[str, Any], *, base: str = "/v1/generations", internal: 
     return view
 
 
-def media_response(job: dict[str, Any] | None) -> FileResponse:
+GONE_STATUSES = {403, 404, 410}
+
+
+async def media_response(svc: Any, job: dict[str, Any] | None, range_header: str | None = None) -> StreamingResponse:
+    """Stream the result from upstream; the video is never stored here.
+
+    Upstream URLs are pre-signed and expire, so a refused URL is refreshed
+    from the generation history once before giving up.
+    """
     if job is None:
         raise ApiError(404, "not_found", "generation not found")
     if job["status"] != "succeeded":
         raise ApiError(409, "not_ready", f"generation is {job['status']}")
-    path = media_available(job)
-    if path is None:
-        if job["output_path"]:
-            raise ApiError(410, "media_expired", "the video was removed by the retention policy")
-        raise ApiError(409, "not_ready", "the video is still downloading")
-    return FileResponse(path, media_type="video/mp4", filename=f"{job['id']}.mp4")
+    if job["error_code"] == "media_expired":
+        raise ApiError(410, "media_expired", "the video is no longer available")
+    if not job["output_url"]:
+        raise ApiError(409, "not_ready", "the video is not available yet")
+    url = job["output_url"]
+    for attempt in range(2):
+        try:
+            stream = await http_client.open_media(url, range_header=range_header)
+            break
+        except UpstreamError as exc:
+            if exc.status == 416:
+                raise ApiError(416, "invalid_input", "the requested byte range is not available") from exc
+            if exc.status not in GONE_STATUSES or attempt:
+                raise ApiError(502, "upstream_unavailable", "the video could not be fetched right now; try again") from exc
+        url = await _fresh_output_url(svc, job)
+    headers = dict(stream.headers)
+    headers["content-disposition"] = f'attachment; filename="{job["id"]}.mp4"'
+    return StreamingResponse(
+        stream.chunks,
+        status_code=stream.status,
+        media_type="video/mp4",
+        headers=headers,
+        background=BackgroundTask(stream.close),
+    )
+
+
+async def _fresh_output_url(svc: Any, job: dict[str, Any]) -> str:
+    try:
+        account = svc.accounts.get(job["account_id"])
+    except AccountError:
+        account = None
+    if account is None or not job["submit_id"]:
+        svc.db.update_job(job["id"], error_code="media_expired", error_message="the video is no longer available")
+        raise ApiError(410, "media_expired", "the video is no longer available")
+    try:
+        async with svc.accounts.client(account) as client:
+            record = await client.history_record(job["submit_id"])
+    except Exception as exc:
+        raise ApiError(502, "upstream_unavailable", "the video could not be fetched right now; try again") from exc
+    url = parse_history(record).video_url if record else None
+    if not url:
+        svc.db.update_job(job["id"], error_code="media_expired", error_message="the video is no longer available")
+        raise ApiError(410, "media_expired", "the video is no longer available")
+    svc.db.update_job(job["id"], output_url=url)
+    return url
 
 
 def credit_summary(svc: Any) -> dict[str, Any]:
@@ -370,7 +419,8 @@ async def get_generation(request: Request, job_id: str):
 
 @v1.get("/generations/{job_id}/content")
 async def get_generation_content(request: Request, job_id: str):
-    return media_response(services(request).db.get_job(job_id))
+    svc = services(request)
+    return await media_response(svc, svc.db.get_job(job_id), request.headers.get("range"))
 
 
 @v1.get("/credits")

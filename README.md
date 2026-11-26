@@ -53,8 +53,8 @@ Every `/v1` call needs `Authorization: Bearer $DREAMINA_API_KEY`. Errors are
 `{"error": {"code": "...", "message": "..."}}` with stable codes:
 `invalid_input`, `unauthorized`, `api_disabled`, `idempotency_conflict`,
 `insufficient_credits` (402), `no_account_available` (503), `not_found`,
-`not_ready`, `media_expired`, `session_expired`, `upstream_rejected`,
-`upstream_timeout`.
+`not_ready`, `media_expired` (410), `upstream_unavailable` (502),
+`session_expired`, `upstream_rejected`, `upstream_timeout`.
 
 | Method | Path | |
 |---|---|---|
@@ -63,7 +63,7 @@ Every `/v1` call needs `Authorization: Bearer $DREAMINA_API_KEY`. Errors are
 | POST | `/v1/generations` | Queue a generation → `202` + `Location` |
 | GET | `/v1/generations?limit=&offset=&status=` | Recent jobs |
 | GET | `/v1/generations/{id}` | Status, credits, errors |
-| GET | `/v1/generations/{id}/content` | The MP4 |
+| GET | `/v1/generations/{id}/content` | The MP4, streamed from upstream (supports `Range`) |
 | GET | `/v1/credits` | Per-account credits (no emails) |
 
 `POST /v1/generations` takes `multipart/form-data` and an `Idempotency-Key`
@@ -110,7 +110,14 @@ const created = await fetch("https://dreamina.example.com/v1/generations", {
 ```
 
 Jobs move `queued → submitting → running → succeeded | failed`. Status is
-polled every 15 s for up to 15 minutes (`DREAMINA_POLL_*`). Videos are kept for
+polled every 15 s for up to 15 minutes (`DREAMINA_POLL_*`).
+
+Videos are never stored on the server. Each `content_url` request streams the
+file from Dreamina's CDN; when the signed CDN link has expired it is refreshed
+from the account's history first. If the video is gone upstream the endpoint
+returns `410 media_expired`, and a temporary CDN failure returns
+`502 upstream_unavailable` (safe to retry). Uploaded references are deleted
+right after submission; failure screenshots are kept for
 `DREAMINA_MEDIA_RETENTION_DAYS` (7).
 
 ## Dashboard
@@ -128,7 +135,78 @@ Account states: `ready`, `needs_login`, `logging_in`, `attention` (CAPTCHA,
 verification, or Dreamina's anti-bot rejection; log in again from the
 dashboard after resolving it in a normal browser), `disabled`.
 
-## Deploy on a VPS (Ubuntu/Debian x86_64, no Docker)
+## Deploy with Docker (recommended)
+
+Needs an x86_64 Linux server (ShardX has no Linux ARM engine) with Docker
+Engine and the compose plugin, e.g. `curl -fsSL https://get.docker.com | sh`.
+
+```bash
+git clone https://github.com/DamianCryptoBoi/dmpx.git sdbf && cd sdbf
+docker compose build
+docker compose run --rm app python scripts/setup_admin.py --write  # admin password; prints the Worker API key
+docker compose up -d
+```
+
+The image holds Python, Chromium's system libraries and the ShardX engine; the
+`sdbf_data` volume holds everything that must survive (`/data/.env` with the
+secrets and account passwords, the job database, browser profiles). The
+container runs as a non-root user with `init`, 1 GB of shared memory for
+Chromium, and rotated logs. Chromium keeps its own sandbox; if a host's
+kernel policy refuses it (the browser fails with "No usable sandbox"), set
+`DREAMINA_BROWSER_ARGS=--no-sandbox` in `.env` and rely on the container as
+the isolation boundary.
+
+The dashboard listens on the server's `127.0.0.1:8000` only. Without Cloudflare,
+reach it with `ssh -N -L 8000:127.0.0.1:8000 <server>` and open
+http://localhost:8000/admin/login in Chrome or Firefox.
+
+### Public HTTPS (Cloudflare Tunnel)
+
+1. Cloudflare Zero Trust → Networks → Tunnels → **Create a tunnel**
+   (Cloudflared) and copy its token.
+2. Add a public hostname such as `sdbf.example.com` with service **HTTP** and
+   URL `app:8000`.
+3. Next to `compose.yaml` on the server, create `.env`:
+   ```
+   COMPOSE_PROFILES=tunnel
+   CLOUDFLARE_TUNNEL_TOKEN=<token>
+   ```
+4. `docker compose up -d`
+
+Cloudflare terminates HTTPS, and no port is open to the internet. Only the
+`cloudflared` container may report the visitor's address
+(`DREAMINA_TRUSTED_PROXIES`), so login throttling stays per visitor.
+
+### Operations (Docker)
+
+- **Update**: `git pull && docker compose up -d --build`
+- **Logs**: `docker compose logs -f app`
+- **Settings**: compose-level knobs (`DREAMINA_MAX_CONCURRENT_JOBS`,
+  `DREAMINA_BROWSER_IDLE_SECONDS`, `DREAMINA_BROWSER_ARGS`) go in
+  `.env` next to `compose.yaml`; secrets and accounts are in the volume, set
+  through `setup_admin.py` and the dashboard.
+- **Backup**: `docker compose stop app`, then
+  `docker run --rm -v sdbf_data:/data -v "$PWD":/backup debian:bookworm-slim tar czf /backup/sdbf-data.tgz -C /data .`,
+  then `docker compose start app`.
+- **Remove**: `docker compose down` keeps the data; `docker compose down -v`
+  also deletes the volume with the accounts and history.
+
+### Sizing
+
+A submission opens one Chromium (~0.5 GB, most of a CPU core for about a
+minute); rendering happens upstream and is only polled over HTTP. Each account
+runs one generation at a time, so N simultaneous generations need N accounts.
+
+| Server | Setting | Result |
+|---|---|---|
+| 2 vCPU / 4 GB | `DREAMINA_MAX_CONCURRENT_JOBS=2` (default) | Up to 4 accounts rendering at once; submissions run two at a time, so the 3rd and 4th start about a minute later |
+| 4 vCPU / 8 GB | `DREAMINA_MAX_CONCURRENT_JOBS=4` | Four submissions at once |
+
+Browsers stay open for `DREAMINA_BROWSER_IDLE_SECONDS` (600) after a job so
+the next one starts faster; on 4 GB with four or more accounts, lower it
+to 120.
+
+## Deploy without Docker (Ubuntu/Debian x86_64)
 
 ```bash
 sudo git clone https://github.com/DamianCryptoBoi/dmpx.git /opt/dreamina
@@ -189,7 +267,7 @@ publicly. The app trusts `CF-Connecting-IP` only for loopback connections
   before retrying such a job yourself.
 - **Memory**: each active account runs one Chromium. Browsers close after
   `DREAMINA_BROWSER_IDLE_SECONDS`; `DREAMINA_MAX_CONCURRENT_JOBS` caps
-  simultaneous submissions.
+  simultaneous submissions. See Sizing above.
 - **Prices** are refreshed from Dreamina every 30 minutes; the verified table
   in `dreamina/catalog.py` is the fallback.
 
@@ -203,7 +281,8 @@ Never automated. Run once per new deployment, after `dry_run.py` passes:
    reference types)
 3. First/last frame on Seedance 2.0 Mini, 4 s, 720p (52 credits)
 4. Replay the same `Idempotency-Key`; expect the same job id and no new charge
-5. `pm2 restart dreamina-proxy` while a job is running; it must finish once
+5. Restart the service (`docker compose restart app` or
+   `pm2 restart dreamina-proxy`) while a job is running; it must finish once
 6. Add a second account from the dashboard and confirm it reaches `ready`
 
 ## Security notes

@@ -263,7 +263,11 @@ class BrowserManager:
 
         profile = await asyncio.to_thread(self._open_or_create_profile, account_id, profile_id)
         launched = await asyncio.to_thread(
-            self.sdk.launch, profile, cdp=True, headless=self.settings.headless
+            self.sdk.launch,
+            profile,
+            cdp=True,
+            headless=self.settings.headless,
+            extra_args=list(self.settings.browser_args) or None,
         )
         playwright = None
         try:

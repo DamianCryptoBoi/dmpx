@@ -1,4 +1,4 @@
-"""Signed read-only Dreamina HTTP calls: credits, history, downloads."""
+"""Signed read-only Dreamina HTTP calls (credits, history) and result streaming."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import json
 import os
 import random
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -336,50 +337,83 @@ class DreaminaHTTP:
         data = payload.get("data") or {}
         return list(data.get("records_list") or [])
 
-    async def download(self, url: str, destination: Path, *, attempts: int = 6) -> Path:
-        """Stream a result file to disk with bounded retries.
 
-        CDN connects either finish in milliseconds or hang, so each attempt
-        uses a fresh connection with a short connect timeout, alternating to
-        IPv4-only after each connect failure. The URL is pre-signed, so
-        no cookies are sent.
-        """
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        temp = destination.with_suffix(destination.suffix + ".part")
-        timeout = httpx.Timeout(connect=8.0, read=60.0, write=60.0, pool=10.0)
-        ipv4_only = False
-        last_error: Exception | None = None
-        for attempt in range(attempts):
-            transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0") if ipv4_only else None
-            try:
-                async with httpx.AsyncClient(
-                    transport=transport,
-                    timeout=timeout,
-                    follow_redirects=True,
-                    headers={"user-agent": self.user_agent},
-                ) as client:
-                    async with client.stream("GET", url) as response:
-                        if response.status_code >= 400:
-                            raise UpstreamError(
-                                f"download HTTP {response.status_code}",
-                                retryable=response.status_code >= 500,
-                                status=response.status_code,
-                            )
-                        with temp.open("wb") as handle:
-                            async for chunk in response.aiter_bytes():
-                                handle.write(chunk)
-                os.replace(temp, destination)
-                os.chmod(destination, 0o600)
-                return destination
-            except (httpx.TransportError, UpstreamError) as exc:
-                temp.unlink(missing_ok=True)
-                if isinstance(exc, UpstreamError) and not exc.retryable:
-                    raise
-                if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
-                    ipv4_only = not ipv4_only
-                last_error = exc
-            if attempt < attempts - 1:
-                await asyncio.sleep(min(2 ** attempt, 8) * 0.5 + random.uniform(0, 0.5))
-        if isinstance(last_error, UpstreamError):
-            raise last_error
-        raise UpstreamTimeout(f"download failed: {type(last_error).__name__}", retryable=True)
+# result streaming ------------------------------------------------------------------
+PASSTHROUGH_HEADERS = ("content-length", "content-range", "accept-ranges")
+
+
+@dataclass
+class MediaStream:
+    """An open upstream response; `chunks` yields the body, `close` releases it."""
+
+    status: int
+    headers: dict[str, str]
+    chunks: AsyncIterator[bytes]
+    close: Callable[[], Awaitable[None]]
+
+
+async def open_media(
+    url: str, *, user_agent: str = DEFAULT_UA, range_header: str | None = None, attempts: int = 4
+) -> MediaStream:
+    """Open a result file for streaming; nothing is written to disk.
+
+    CDN connects either finish in milliseconds or hang, so each attempt uses a
+    fresh connection with a short connect timeout, alternating to IPv4-only
+    after each connect failure. Retries happen only before the first byte.
+    The URL is pre-signed, so no cookies are sent.
+    """
+    # identity: the passed-through Content-Length must match the bytes we relay.
+    headers = {"user-agent": user_agent, "accept-encoding": "identity"}
+    if range_header:
+        headers["range"] = range_header
+    timeout = httpx.Timeout(connect=8.0, read=60.0, write=60.0, pool=10.0)
+    ipv4_only = False
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0") if ipv4_only else None
+        client = httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True, headers=headers)
+        try:
+            response = await client.send(client.build_request("GET", url), stream=True)
+        except httpx.TransportError as exc:
+            await client.aclose()
+            if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+                ipv4_only = not ipv4_only
+            last_error = exc
+        else:
+            if response.status_code < 400:
+                return _media_stream(client, response)
+            await response.aclose()
+            await client.aclose()
+            last_error = UpstreamError(
+                f"media HTTP {response.status_code}",
+                retryable=response.status_code >= 500,
+                status=response.status_code,
+            )
+            if not last_error.retryable:
+                raise last_error
+        if attempt < attempts - 1:
+            await asyncio.sleep(min(2 ** attempt, 8) * 0.5 + random.uniform(0, 0.5))
+    if isinstance(last_error, UpstreamError):
+        raise last_error
+    raise UpstreamTimeout(f"media fetch failed: {type(last_error).__name__}", retryable=True)
+
+
+def _media_stream(client: httpx.AsyncClient, response: httpx.Response) -> MediaStream:
+    closed = False
+
+    async def close() -> None:
+        nonlocal closed
+        if not closed:
+            closed = True
+            await response.aclose()
+            await client.aclose()
+
+    async def chunks() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in response.aiter_bytes(64 * 1024):
+                yield chunk
+        finally:
+            await close()
+
+    headers = {name: response.headers[name] for name in PASSTHROUGH_HEADERS if name in response.headers}
+    return MediaStream(status=response.status_code, headers=headers, chunks=chunks(), close=close)

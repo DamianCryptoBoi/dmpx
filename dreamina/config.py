@@ -64,6 +64,8 @@ class Settings:
     login_throttle_attempts: int
     login_throttle_seconds: int
     log_level: str
+    trusted_proxies: tuple[str, ...] = ()
+    browser_args: tuple[str, ...] = ()
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -142,11 +144,13 @@ class Settings:
             login_throttle_attempts=max(1, _as_int(get("DREAMINA_LOGIN_THROTTLE_ATTEMPTS"), 5)),
             login_throttle_seconds=max(60, _as_int(get("DREAMINA_LOGIN_THROTTLE_SECONDS"), 900)),
             log_level=(get("DREAMINA_LOG_LEVEL") or "INFO").upper(),
+            trusted_proxies=tuple(part.strip() for part in (get("DREAMINA_TRUSTED_PROXIES") or "").split(",") if part.strip()),
+            browser_args=tuple((get("DREAMINA_BROWSER_ARGS") or "").split()),
             warnings=tuple(warnings),
         )
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_dir, self.media_dir, self.jobs_dir, self.profiles_dir, self.shardx_cache_dir):
+        for path in (self.data_dir, self.jobs_dir, self.profiles_dir, self.shardx_cache_dir):
             path.mkdir(parents=True, exist_ok=True)
             try:
                 path.chmod(0o700)

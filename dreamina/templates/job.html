@@ -13,9 +13,9 @@
       <video controls preload="metadata" src="{{ job.content_url }}"></video>
       <p><a href="{{ job.content_url }}" download>Download MP4</a></p>
     {% elif job.media == "expired" %}
-      <p class="muted">The video was removed by the retention policy.</p>
+      <p class="muted">The video is no longer available.</p>
     {% elif job.media == "pending" %}
-      <p class="muted">Generation finished; the video is downloading.</p>
+      <p class="muted">Generation finished; the video link is not available yet.</p>
     {% else %}
       <p class="muted">No video yet.</p>
     {% endif %}

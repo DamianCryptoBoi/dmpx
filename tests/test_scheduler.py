@@ -74,7 +74,7 @@ async def test_job_runs_to_success(services, dreamina):
     (services.settings.jobs_dir / job_id / "inputs").mkdir(parents=True)
     await services.queue.start()
     try:
-        await wait_for(lambda: services.db.get_job(job_id)["output_path"])
+        await wait_for(lambda: status(services, job_id) == "succeeded")
     finally:
         await services.queue.stop()
     job = services.db.get_job(job_id)
@@ -82,6 +82,7 @@ async def test_job_runs_to_success(services, dreamina):
     assert job["account_id"] == "alpha" and job["submit_id"] == "submit-1"
     assert job["credits_used"] == 84 and job["output_url"] == "https://cdn/x.mp4"
     assert not (services.settings.jobs_dir / job_id / "inputs").exists()
+    assert not services.settings.media_dir.exists()
     assert not services.accounts.busy
     assert services.db.get_account("alpha")["last_used_at"]
 
@@ -173,7 +174,7 @@ async def test_recovery_resumes_polling_and_never_resubmits(services, dreamina):
     dreamina.history["submit-9"] = SUCCESS
     await services.queue.start()
     try:
-        await wait_for(lambda: services.db.get_job(running)["output_path"])
+        await wait_for(lambda: status(services, running) == "succeeded")
     finally:
         await services.queue.stop()
     assert status(services, running) == "succeeded"
@@ -210,7 +211,7 @@ async def test_error_after_submit_is_polled_not_failed(services, dreamina):
     job_id = queue_job(services)
     await services.queue.start()
     try:
-        await wait_for(lambda: services.db.get_job(job_id)["output_path"])
+        await wait_for(lambda: status(services, job_id) == "succeeded")
     finally:
         await services.queue.stop()
     job = services.db.get_job(job_id)
@@ -317,4 +318,9 @@ async def test_success_without_url_waits_for_media_instead_of_failing(services, 
     finally:
         await services.queue.stop()
     job = services.db.get_job(job_id)
-    assert job["error_code"] == "download_pending" and not job["output_path"]
+    assert job["error_code"] == "media_pending" and not job["output_url"]
+
+    dreamina.history["submit-1"] = {"status": 50, "credits_consume": 84, "video_url": "https://cdn/late.mp4"}
+    await services.queue.maintain()
+    job = services.db.get_job(job_id)
+    assert job["output_url"] == "https://cdn/late.mp4" and job["error_code"] is None

@@ -1,0 +1,58 @@
+# SDBF with optional public HTTPS through a Cloudflare Tunnel.
+#
+#   docker compose up -d --build     start (and rebuild after `git pull`)
+#   docker compose logs -f app       follow the service log
+#
+# Settings for compose itself go in .env next to this file:
+#   COMPOSE_PROFILES=tunnel                 also run cloudflared
+#   CLOUDFLARE_TUNNEL_TOKEN=...             from Cloudflare Zero Trust > Tunnels
+#   DREAMINA_MAX_CONCURRENT_JOBS=2          browsers submitting at once
+#   DREAMINA_BROWSER_IDLE_SECONDS=600       keep a browser open this long after a job
+# The service's own secrets and accounts live in the data volume (/data/.env);
+# set them with: docker compose run --rm app python scripts/setup_admin.py --write
+name: sdbf
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  app:
+    build: .
+    image: sdbf:local
+    platform: linux/amd64
+    init: true # reaps the browser's child processes
+    restart: unless-stopped
+    shm_size: 1gb # Chromium needs more shared memory than Docker's 64 MB
+    stop_grace_period: 45s
+    ports:
+      # Host-only: reach the dashboard over an SSH tunnel when Cloudflare is off.
+      - "127.0.0.1:${SDBF_PORT:-8000}:8000"
+    volumes:
+      - data:/data
+    environment:
+      DREAMINA_MAX_CONCURRENT_JOBS: ${DREAMINA_MAX_CONCURRENT_JOBS:-2}
+      DREAMINA_BROWSER_IDLE_SECONDS: ${DREAMINA_BROWSER_IDLE_SECONDS:-600}
+      # Only if the browser fails with "No usable sandbox": --no-sandbox
+      DREAMINA_BROWSER_ARGS: ${DREAMINA_BROWSER_ARGS:-}
+      # cloudflared's container may report the visitor's address; nobody else.
+      DREAMINA_TRUSTED_PROXIES: cloudflared
+    logging: *logging
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.7.3
+    profiles: [tunnel]
+    restart: unless-stopped
+    # In Cloudflare, point the tunnel's public hostname at http://app:8000.
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      app:
+        condition: service_healthy
+    logging: *logging
+
+volumes:
+  data:
