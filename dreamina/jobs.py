@@ -190,7 +190,6 @@ class JobQueue:
                 retryable = True
             finally:
                 self._submitting -= 1
-                cleanup_inputs(self.settings.jobs_dir / job_id)
 
             job = self.db.get_job(job_id) or {}
             submit_id = outcome.submit_id if outcome else job.get("submit_id")
@@ -199,7 +198,7 @@ class JobQueue:
                 if attempts < MAX_ATTEMPTS:
                     # Nothing was sent, so nothing was charged: try again,
                     # normally on another account (this one is now the most
-                    # recently used).
+                    # recently used). The uploaded files stay for that attempt.
                     log.warning("job %s attempt %d failed before submitting (%s); retrying", job_id, attempts, failure[1])
                     self.db.update_job(
                         job_id,
@@ -214,6 +213,7 @@ class JobQueue:
                 self._fail(job_id, *failure)
                 return
             # From here on the generation may be charged: only ever poll it.
+            cleanup_inputs(self.settings.jobs_dir / job_id)
             notes = list(outcome.warnings) if outcome else [f"error after submitting: {failure[1]}"]
             self.db.update_job(job_id, status="running", submit_id=submit_id, error_message=None)
             if notes:

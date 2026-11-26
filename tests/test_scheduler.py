@@ -363,6 +363,35 @@ async def test_failure_before_submitting_is_retried_for_free(services, dreamina)
     assert job["error_message"] is None  # the retry note is cleared once submitted
 
 
+async def test_retry_keeps_the_uploaded_files(services, dreamina):
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")
+    make_ready(services, "beta")
+    job_id = queue_job(services)
+    inputs = services.settings.jobs_dir / job_id / "inputs"
+    inputs.mkdir(parents=True)
+    (inputs / "image1.png").write_bytes(b"png")
+    seen = []
+    real = services.browsers.generate
+
+    async def generate(account_id, *args, **kwargs):
+        seen.append((inputs / "image1.png").exists())
+        if len(seen) == 1:
+            services.browsers.generate_calls.append((account_id, None))
+            raise BrowserError("reference upload did not finish")
+        return await real(account_id, *args, **kwargs)
+
+    services.browsers.generate = generate
+    dreamina.history["submit-1"] = SUCCESS
+    await services.queue.start()
+    try:
+        await wait_for(lambda: status(services, job_id) == "succeeded")
+    finally:
+        await services.queue.stop()
+    assert seen == [True, True]  # the retry still has its files
+    assert not inputs.exists()  # removed once submitted
+
+
 async def test_retries_stop_after_three_attempts(services):
     services.accounts.sync_from_env()
     make_ready(services, "alpha")

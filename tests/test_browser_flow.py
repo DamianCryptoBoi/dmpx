@@ -417,6 +417,53 @@ def test_promo_closer_never_targets_the_acknowledgment():
     assert ':not(:has([class*="aigc-compliance-confirmation"]))' in POPUP
 
 
+class StackPage:
+    """The omni reference stack: every dropped file is added, but the collapsed
+    stack draws only its first and newest cards."""
+
+    def __init__(self, busy_polls=0):
+        self.files = 0
+        self.busy_polls = busy_polls
+        self.polls = 0
+
+    async def evaluate(self, script, args):
+        self.files += len(args["files"])
+        return "dispatched"
+
+    async def wait_for_timeout(self, ms):
+        self.polls += 1
+        if self.polls > 20:
+            raise AssertionError("still waiting for references that are never drawn")
+
+    def locator(self, selector):
+        page = self
+
+        class Count:
+            async def count(self):
+                if selector == browser.FIRST_SLOT:
+                    return 1
+                if selector == browser.REFERENCE_BODY:
+                    return min(page.files, 2)
+                if "aria-busy" in selector:
+                    return 1 if page.polls < page.busy_polls else 0
+                raise AssertionError(selector)
+
+        return Count()
+
+
+@pytest.mark.parametrize("count", [1, 2, 3, 5])
+async def test_reference_upload_finishes_with_more_files_than_the_stack_draws(manager, tmp_path, count):
+    files = []
+    for index in range(count):
+        path = tmp_path / f"image{index + 1}.png"
+        path.write_bytes(b"png")
+        files.append(str(path))
+    page = StackPage(busy_polls=2)
+    await manager._upload_references(page, files)
+    assert page.files == count
+    assert page.polls >= 2  # waited while the slot was busy
+
+
 def test_render_failures_explain_the_reason():
     from dreamina.http_client import parse_history
     from dreamina.jobs import render_failure

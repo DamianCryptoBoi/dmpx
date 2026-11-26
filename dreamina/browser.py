@@ -74,6 +74,7 @@ SETTINGS_BUTTON = (
 VISIBLE_POPOVER = '.lv-popover-inner'
 CHIP = 'span.node-referenceMentionTag'
 REFERENCE_BODY = '[data-native-reference-body]'
+STACK_CARDS = 2  # cards the collapsed reference stack draws, however many it holds
 FIRST_SLOT = '[id$="reference-upload-0"]'
 SECOND_SLOT = '[id$="reference-upload-1"]'
 GENERATE_PATH = "/mweb/v1/aigc_draft/generate"
@@ -875,11 +876,16 @@ class BrowserManager:
         if not await page.locator(FIRST_SLOT).count():
             raise BrowserError("reference upload slot not found")
         await self._drop(page, FIRST_SLOT, files)
+        # The collapsed reference stack draws only its first and newest cards
+        # however many files it holds, so never wait for more cards than that.
+        # The prompt step then proves every file arrived: each one must be in
+        # the mention menu to become a chip.
+        drawn = min(len(files), STACK_CARDS)
         deadline = time.time() + 300
         while time.time() < deadline:
             bodies = await page.locator(REFERENCE_BODY).count()
             busy = await page.locator('[id*="reference-upload"][aria-busy="true"]').count()
-            if bodies >= len(files) and not busy:
+            if bodies >= drawn and not busy:
                 return
             await page.wait_for_timeout(500)
         raise BrowserError("reference upload did not finish")
