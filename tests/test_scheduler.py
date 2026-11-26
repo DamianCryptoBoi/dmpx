@@ -324,3 +324,102 @@ async def test_success_without_url_waits_for_media_instead_of_failing(services, 
     await services.queue.maintain()
     job = services.db.get_job(job_id)
     assert job["output_url"] == "https://cdn/late.mp4" and job["error_code"] is None
+
+
+# retries before submitting, and models that differ by account -------------------------
+from dreamina.browser import ModelUnavailable, NotSubmitted
+
+
+def fail_first(services, *errors):
+    """Make the fake browser raise these errors on its first calls, then succeed."""
+    pending = list(errors)
+    real = services.browsers.generate
+
+    async def generate(account_id, *args, **kwargs):
+        if pending:
+            services.browsers.generate_calls.append((account_id, None))
+            error = pending.pop(0)
+            raise error(account_id) if callable(error) and not isinstance(error, Exception) else error
+        return await real(account_id, *args, **kwargs)
+
+    services.browsers.generate = generate
+
+
+async def test_failure_before_submitting_is_retried_for_free(services, dreamina):
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")
+    make_ready(services, "beta")
+    fail_first(services, BrowserError("reference mode index 0 was not applied"))
+    dreamina.history["submit-1"] = SUCCESS
+    job_id = queue_job(services)
+    await services.queue.start()
+    try:
+        await wait_for(lambda: status(services, job_id) == "succeeded")
+    finally:
+        await services.queue.stop()
+    job = services.db.get_job(job_id)
+    first, second = [account for account, _ in services.browsers.generate_calls]
+    assert job["attempts"] == 1 and first != second  # moved to the other account
+    assert job["error_message"] is None  # the retry note is cleared once submitted
+
+
+async def test_retries_stop_after_three_attempts(services):
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")
+    services.browsers.generate_error = NotSubmitted("no generate request was sent; nothing was charged")
+    job_id = queue_job(services)
+    await services.queue.start()
+    try:
+        await wait_for(lambda: status(services, job_id) == "failed")
+    finally:
+        await services.queue.stop()
+    job = services.db.get_job(job_id)
+    assert len(services.browsers.generate_calls) == 3 and job["attempts"] == 2
+    assert "nothing was charged" in job["error_message"]
+
+
+async def test_jobs_go_only_to_accounts_offering_the_model(services, dreamina):
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")  # never used: picked first if it qualified
+    make_ready(services, "beta", last_used="2020-01-01T00:00:00+00:00")
+    services.accounts.record_models("alpha", ["dreamina_seedance_40_mini"])  # a region without 2.5 Flash
+    dreamina.history["submit-1"] = SUCCESS
+    job_id = queue_job(services)  # seedance-2.5-flash
+    await services.queue.start()
+    try:
+        await wait_for(lambda: status(services, job_id) == "succeeded")
+    finally:
+        await services.queue.stop()
+    assert [account for account, _ in services.browsers.generate_calls] == ["beta"]
+    assert services.accounts.view(services.db.get_account("alpha"))["models"] == ["dreamina_seedance_40_mini"]
+
+
+async def test_missing_model_moves_the_job_and_is_remembered(services, dreamina):
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")  # never used: picked first
+    make_ready(services, "beta", last_used="2020-01-01T00:00:00+00:00")
+
+    def unavailable(account_id):
+        services.accounts.record_models(account_id, ["dreamina_seedance_40_mini"])  # what the browser reports
+        return ModelUnavailable("model dreamina_seedance_45_flash is not offered to this account")
+
+    fail_first(services, unavailable)
+    dreamina.history["submit-1"] = SUCCESS
+    job_id = queue_job(services)
+    await services.queue.start()
+    try:
+        await wait_for(lambda: status(services, job_id) == "succeeded")
+    finally:
+        await services.queue.stop()
+    assert [account for account, _ in services.browsers.generate_calls] == ["alpha", "beta"]
+    assert services.accounts.pick(84, "dreamina_seedance_45_flash")["id"] == "beta"
+
+
+def test_capacity_check_refuses_a_model_no_account_offers(services):
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")
+    services.accounts.record_models("alpha", ["dreamina_seedance_40_mini"])
+    with pytest.raises(AccountError) as excinfo:
+        services.accounts.check_capacity(84, "dreamina_seedance_45_flash")
+    assert (excinfo.value.code, excinfo.value.status) == ("no_account_available", 503)
+    services.accounts.check_capacity(52, "dreamina_seedance_40_mini")  # offered: fine

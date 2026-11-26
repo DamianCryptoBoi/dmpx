@@ -21,6 +21,8 @@ from .media import cleanup_inputs, cleanup_job_dirs
 log = logging.getLogger(__name__)
 
 TERMINAL = {"succeeded", "failed"}
+# Tries per job for failures before anything is submitted (never charged).
+MAX_ATTEMPTS = 3
 
 
 # Reasons Dreamina gives when it discards a finished render. These are its
@@ -141,10 +143,11 @@ class JobQueue:
                 self._fail(job["id"], "invalid_input", str(exc))
                 continue
             estimate = spec.estimate_credits
-            account = self.accounts.pick(estimate)
+            model_key = spec.model.dreamina_key
+            account = self.accounts.pick(estimate, model_key)
             if account is None:
                 # Busy or logging-in accounts may free up; stay queued for them.
-                reason = self.accounts.unavailable_reason(estimate)
+                reason = self.accounts.unavailable_reason(estimate, model_key)
                 if reason:
                     self._fail(job["id"], *reason)
                 continue
@@ -164,6 +167,7 @@ class JobQueue:
             outcome = None
             failure: tuple[str, str] | None = None
             definitive = False
+            retryable = False
             try:
                 account = self.accounts.get(account_id)
                 outcome = await self.browsers.generate(
@@ -178,21 +182,40 @@ class JobQueue:
                 failure = self._classify(account_id, exc)
                 # Dreamina answered ret != 0: nothing was charged, nothing to poll.
                 definitive = isinstance(exc, GenerationRejected)
+                # Page problems are retried; account problems fail at once.
+                retryable = not definitive and not isinstance(exc, (LoginAttention, LoginFailed))
             except Exception as exc:
                 log.exception("job %s submission crashed", job_id)
                 failure = ("upstream_rejected", f"{type(exc).__name__}: {self.accounts.error_text(exc)}")
+                retryable = True
             finally:
                 self._submitting -= 1
                 cleanup_inputs(self.settings.jobs_dir / job_id)
 
             job = self.db.get_job(job_id) or {}
             submit_id = outcome.submit_id if outcome else job.get("submit_id")
+            if failure and not submit_id and retryable:
+                attempts = int(job.get("attempts") or 0) + 1
+                if attempts < MAX_ATTEMPTS:
+                    # Nothing was sent, so nothing was charged: try again,
+                    # normally on another account (this one is now the most
+                    # recently used).
+                    log.warning("job %s attempt %d failed before submitting (%s); retrying", job_id, attempts, failure[1])
+                    self.db.update_job(
+                        job_id,
+                        status="queued",
+                        account_id=None,
+                        started_at=None,
+                        attempts=attempts,
+                        error_message=self.accounts.redact(f"retrying after: {failure[1]}")[:500],
+                    )
+                    return
             if failure and (definitive or not submit_id):
                 self._fail(job_id, *failure)
                 return
             # From here on the generation may be charged: only ever poll it.
             notes = list(outcome.warnings) if outcome else [f"error after submitting: {failure[1]}"]
-            self.db.update_job(job_id, status="running", submit_id=submit_id)
+            self.db.update_job(job_id, status="running", submit_id=submit_id, error_message=None)
             if notes:
                 log.warning("job %s submitted with notes: %s", job_id, "; ".join(notes))
                 self.db.update_job(job_id, error_message=self.accounts.redact("; ".join(notes))[:500])

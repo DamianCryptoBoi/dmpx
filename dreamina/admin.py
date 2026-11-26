@@ -224,7 +224,8 @@ async def status_json(request: Request):
 @router.get("/accounts", response_class=HTMLResponse)
 async def accounts_page(request: Request):
     payload = session(request)
-    return render(request, "accounts.html", payload, accounts=account_rows(services(request)))
+    model_names = {model.dreamina_key: model.name for model in MODELS.values()}
+    return render(request, "accounts.html", payload, accounts=account_rows(services(request)), model_names=model_names)
 
 
 @router.post("/accounts")

@@ -189,7 +189,7 @@ async def create_generation(svc: Any, form: FormData, idempotency_key: str | Non
     if svc.db.get_job_by_idempotency(key):
         return replay()
     try:
-        svc.accounts.check_capacity(spec.estimate_credits)
+        svc.accounts.check_capacity(spec.estimate_credits, spec.model.dreamina_key)
     except AccountError as exc:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise ApiError(exc.status, exc.code, exc.message) from exc

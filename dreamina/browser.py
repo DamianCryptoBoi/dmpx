@@ -101,6 +101,10 @@ class NotSubmitted(BrowserError):
     """No generate request left the page, so nothing was charged."""
 
 
+class ModelUnavailable(BrowserError):
+    """The account's model menu lacks the model; models differ by region."""
+
+
 class SubmitUncertain(BrowserError):
     """Submit was clicked but the outcome is unknown and no submit_id was seen."""
 
@@ -297,6 +301,8 @@ class BrowserManager:
         # Called with (account_id, profile_id) when a new profile is created,
         # so a failed first login does not leave the next attempt a new device.
         self.on_profile_created: Callable[[str, str], None] | None = None
+        # Called with (account_id, model keys) whenever a model menu is read.
+        self.on_models_seen: Callable[[str, list[str]], None] | None = None
 
     @property
     def sdk(self) -> ShardX:
@@ -550,7 +556,7 @@ class BrowserManager:
             await self._login_flow(page, email, password)
         model_index = await self._find_model_combo(page)
         await self._select_mode(page, spec, model_index)
-        await self._select_model(page, spec.model.dreamina_key, model_index)
+        await self._select_model(page, spec.model.dreamina_key, model_index, account_id)
         if spec.mode == "unified":
             await self._upload_references(page, spec.images + spec.audio)
             await self._set_radio(page, spec.aspect_ratio)
@@ -765,12 +771,17 @@ class BrowserManager:
         except PlaywrightTimeoutError as exc:
             raise BrowserError("model dropdown did not open") from exc
 
-    async def _select_model(self, page: Page, model_key: str, model_index: int) -> None:
+    async def _select_model(self, page: Page, model_key: str, model_index: int, account_id: str | None = None) -> None:
         await self._open_model_panel(page, model_index)
+        offered = await page.locator(MODEL_PANEL_OPTIONS).evaluate_all(
+            "els => els.map(e => e.getAttribute('data-model-key')).filter(Boolean)"
+        )
+        if account_id and self.on_models_seen is not None and offered:
+            self.on_models_seen(account_id, offered)
         option = page.locator(MODEL_OPTION.format(key=model_key)).first
         if not await option.count():
             await self._close_menu(page)
-            raise BrowserError(f"model {model_key} is not offered by the UI")
+            raise ModelUnavailable(f"model {model_key} is not offered to this account")
         await option.scroll_into_view_if_needed()
         await option.click()
         await page.wait_for_timeout(900)
@@ -796,12 +807,41 @@ class BrowserManager:
         return options
 
     async def _select_mode(self, page: Page, spec: GenerationSpec, model_index: int) -> None:
-        if spec.mode == "first_last":
-            target = self.settings.mode_index_first_last
-        else:
-            target = self.settings.mode_index_unified
-        # The reference-mode selector is the first listbox combobox after the
-        # model selector.
+        """Pick the reference mode and confirm it took. Switching modes rebuilds
+        the prompt area, which is slow on a busy server, so the switch is
+        retried after the toolbar settles."""
+        target = self.settings.mode_index_first_last if spec.mode == "first_last" else self.settings.mode_index_unified
+        problem = "reference mode selector not found"
+        for attempt in range(3):
+            if attempt:
+                await self._dismiss_overlays(page)
+                await page.wait_for_timeout(1_500)
+            combo_index, options = await self._open_mode_menu(page, model_index)
+            if options is None:
+                problem = "reference mode selector not found"
+                continue
+            count = await options.count()
+            if target >= count:
+                await self._close_menu(page)
+                raise BrowserError(f"reference mode index {target} is outside the {count} available options")
+            if await options.nth(target).get_attribute("aria-selected") == "true":
+                await self._close_menu(page)
+                return
+            await options.nth(target).click()
+            await self._wait_combo_ready(page, combo_index)
+            combo_index, options = await self._open_mode_menu(page, model_index)
+            selected = options is not None and await options.nth(target).get_attribute("aria-selected") == "true"
+            if options is not None:
+                await self._close_menu(page)
+            if selected:
+                return
+            problem = f"reference mode index {target} was not applied"
+            log.info("mode switch attempt %d did not apply; retrying", attempt + 1)
+        raise BrowserError(problem)
+
+    async def _open_mode_menu(self, page: Page, model_index: int):
+        """Open the reference-mode listbox: the first listbox combobox after
+        the model selector. Returns (index, options) or (None, None)."""
         combos = page.locator(COMBOBOX)
         for combo_index in range(model_index + 1, await combos.count()):
             if not await self._open_combo(page, combo_index):
@@ -810,22 +850,24 @@ class BrowserManager:
             if options is None or await page.locator(MODEL_PANEL_OPTIONS).count():
                 await self._close_menu(page)
                 continue
-            count = await options.count()
-            if target >= count:
-                await self._close_menu(page)
-                raise BrowserError(f"reference mode index {target} is outside the {count} available options")
-            await options.nth(target).click()
-            await page.wait_for_timeout(900)
-            await self._dismiss_overlays(page)
-            if not await self._open_combo(page, combo_index):
-                raise BrowserError("reference mode selector became disabled")
-            options = await self._menu_options(page, combo_index)
-            selected = options is not None and await options.nth(target).get_attribute("aria-selected") == "true"
-            await self._close_menu(page)
-            if not selected:
-                raise BrowserError(f"reference mode index {target} was not applied")
-            return
-        raise BrowserError("reference mode selector not found")
+            return combo_index, options
+        return None, None
+
+    async def _wait_combo_ready(self, page: Page, combo_index: int, timeout: float = 10.0) -> None:
+        combo = page.locator(COMBOBOX).nth(combo_index)
+        await page.wait_for_timeout(600)
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                if (
+                    await combo.is_visible()
+                    and await combo.get_attribute("aria-disabled") != "true"
+                    and await combo.get_attribute("aria-expanded") != "true"
+                ):
+                    return
+            except Exception:
+                pass
+            await page.wait_for_timeout(400)
 
     async def _upload_references(self, page: Page, files: list[str]) -> None:
         if not files:

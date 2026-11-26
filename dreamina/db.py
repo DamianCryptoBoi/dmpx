@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 ACCOUNT_FIELDS = {
+    "models_json",
     "label",
     "email",
     "env_key",
@@ -26,6 +27,7 @@ ACCOUNT_FIELDS = {
     "updated_at",
 }
 JOB_FIELDS = {
+    "attempts",
     "account_id",
     "status",
     "submit_id",
@@ -124,6 +126,14 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_accounts_enabled_state ON accounts(enabled, session_state);
                 """
             )
+            # Columns added after the first release.
+            self._add_column("accounts", "models_json", "TEXT")
+            self._add_column("jobs", "attempts", "INTEGER NOT NULL DEFAULT 0")
+
+    def _add_column(self, table: str, column: str, definition: str) -> None:
+        columns = {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     # accounts ---------------------------------------------------------
     def upsert_account_from_env(self, account_id: str, label: str, email: str, env_key: str) -> None:

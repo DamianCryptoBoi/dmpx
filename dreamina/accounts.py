@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import shutil
@@ -51,6 +52,7 @@ class AccountService:
         self.env = env
         self.browsers = browsers
         self.http_factory = http_factory
+        browsers.on_models_seen = self.record_models
         # Persist a new browser profile at once, so retries reuse the same device.
         browsers.on_profile_created = lambda account_id, profile_id: self.db.update_account(account_id, profile_id=profile_id)
         # Accounts with an in-flight generation; maintained by the job queue.
@@ -111,7 +113,24 @@ class AccountService:
             "last_error": account["last_error"],
             "has_password": self.has_password(account["id"]),
             "has_cookies": bool(account["cookies_path"]) and Path(account["cookies_path"]).exists(),
+            "models": self.models(account),
         }
+
+    @staticmethod
+    def models(account: dict[str, Any]) -> list[str] | None:
+        """Model keys the account's menu offered when last seen; None if unknown."""
+        try:
+            keys = json.loads(account.get("models_json") or "null")
+        except (TypeError, ValueError):
+            return None
+        return keys if isinstance(keys, list) else None
+
+    def offers(self, account: dict[str, Any], model_key: str | None) -> bool:
+        keys = self.models(account)
+        return model_key is None or keys is None or model_key in keys
+
+    def record_models(self, account_id: str, keys: list[str]) -> None:
+        self.db.update_account(account_id, models_json=json.dumps(sorted(set(keys))))
 
     def list(self) -> list[dict[str, Any]]:
         return [self.view(account) for account in self.db.list_accounts()]
@@ -291,17 +310,20 @@ class AccountService:
             and self.has_password(account["id"])
         ]
 
-    def check_capacity(self, estimate: int) -> None:
+    def check_capacity(self, estimate: int, model_key: str | None = None) -> None:
         """Fail fast at enqueue time instead of queueing a job nothing can run."""
         usable = self.usable()
         if not usable:
             raise AccountError("no_account_available", "no generation capacity is available right now", 503)
+        usable = [account for account in usable if self.offers(account, model_key)]
+        if not usable:
+            raise AccountError("no_account_available", "no account can generate with this model right now", 503)
         if not any((account["credits"] or 0) >= estimate for account in usable):
             raise AccountError(
                 "insufficient_credits", f"not enough credits for this generation (needs {estimate})", 402
             )
 
-    def unavailable_reason(self, estimate: int) -> tuple[str, str] | None:
+    def unavailable_reason(self, estimate: int, model_key: str | None = None) -> tuple[str, str] | None:
         """Why no account can take a queued job, or None if one may free up
         (busy with another job or logging in)."""
         candidates = [
@@ -321,18 +343,23 @@ class AccountService:
         ]
         if not candidates:
             return "no_account_available", "no generation capacity is available right now"
+        candidates = [account for account in candidates if self.offers(account, model_key)]
+        if not candidates:
+            return "no_account_available", "no account can generate with this model right now"
         if not any(account["credits"] is None or account["credits"] >= estimate for account in candidates):
             return "insufficient_credits", f"not enough credits for this generation (needs {estimate})"
         return None
 
-    def pick(self, estimate: int) -> dict[str, Any] | None:
-        """Least-recently-used idle account with enough cached credits."""
+    def pick(self, estimate: int, model_key: str | None = None) -> dict[str, Any] | None:
+        """Least-recently-used idle account with enough cached credits that
+        offers the model (or whose models are not known yet)."""
         candidates = [
             account
             for account in self.usable()
             if account["id"] not in self.busy
             and account["id"] not in self._logins
             and (account["credits"] or 0) >= estimate
+            and self.offers(account, model_key)
         ]
         candidates.sort(key=lambda account: (account["last_used_at"] or "", account["id"]))
         return candidates[0] if candidates else None
