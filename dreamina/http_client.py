@@ -89,6 +89,7 @@ class HistoryState:
     video_url: str | None
     credits_used: int | None
     fail_code: str | None
+    fail_msg: str | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -108,6 +109,7 @@ def parse_history(record: dict[str, Any]) -> HistoryState:
         video_url=find_value(record, "video_url") or None,
         credits_used=int(credits) if isinstance(credits, (int, float)) else None,
         fail_code=str(fail_code) if fail_code not in (None, "", 0, "0") else None,
+        fail_msg=str(record.get("fail_msg") or "") or None,
     )
 
 

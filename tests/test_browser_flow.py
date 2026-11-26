@@ -6,6 +6,8 @@ import pytest
 
 from dreamina import browser
 from dreamina.browser import (
+    COMPLIANCE_AGREE,
+    POPUP,
     apply_language,
     BrowserError,
     BrowserManager,
@@ -118,7 +120,31 @@ class FakeSubmit:
         self.page.script.pop(0)(self.page)
 
 
+class FakeAgree:
+    """The acknowledgment's Agree button: present only while page.compliance is set."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def filter(self, **_kwargs):
+        return self
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self):
+        return 1 if self.page.compliance else 0
+
+    async def click(self, **_kwargs):
+        self.page.agreed += 1
+        step, self.page.compliance = self.page.compliance, None
+        step(self.page)
+
+
 class FakePage:
+    agreed = 0
+
     def __init__(self, script):
         self.url = "https://dreamina.capcut.com/ai-tool/generate"
         self.script = list(script)
@@ -131,7 +157,11 @@ class FakePage:
     def remove_listener(self, event, handler):
         self.handlers[event].remove(handler)
 
+    compliance = None  # set to a script step: the dialog is up until Agree runs it
+
     def locator(self, selector):
+        if selector == COMPLIANCE_AGREE:
+            return FakeAgree(self)
         return FakeSubmit(self)
 
     def send(self, body, payload=None):
@@ -367,3 +397,32 @@ async def test_open_browsers_stay_within_the_concurrency_limit(manager):
     async with manager._account_lock("busy"):
         await manager._make_room("third")
     assert closed == ["idle"] and set(manager._sessions) == {"busy"}
+
+
+async def test_first_generation_acknowledgment_is_agreed_then_submitted(manager):
+    page = FakePage([lambda p: None])  # the click only opens the acknowledgment
+    page.compliance = lambda p: p.send(draft(), OK)  # agreeing sends the request
+    manager.submit_timeout = 0.3
+    outcome = await submit(manager, page)
+    assert outcome.submit_id == "resp-submit" and page.clicks == 1 and page.agreed == 1
+
+
+async def test_no_acknowledgment_means_nothing_is_agreed(manager):
+    page = FakePage([lambda p: p.send(draft(), OK)])
+    await submit(manager, page)
+    assert page.agreed == 0
+
+
+def test_promo_closer_never_targets_the_acknowledgment():
+    assert ':not(:has([class*="aigc-compliance-confirmation"]))' in POPUP
+
+
+def test_render_failures_explain_the_reason():
+    from dreamina.http_client import parse_history
+    from dreamina.jobs import render_failure
+
+    state = parse_history({"status": 30, "fail_code": "2052", "fail_msg": "OutputAudioCopyright"})
+    assert state.failed and state.fail_msg == "OutputAudioCopyright"
+    message = render_failure(state.fail_code, state.fail_msg)
+    assert "code 2052" in message and "copyrighted music" in message and "nothing was charged" in message
+    assert render_failure("7", None) == "the generation failed while rendering (code 7)"

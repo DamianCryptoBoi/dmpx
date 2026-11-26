@@ -48,10 +48,17 @@ EMAIL_METHOD = (
 EMAIL_INPUT = 'input[type="email"][name="username"]'
 PASSWORD_INPUT = 'input[type="password"][name="password"]'
 CONTINUE_BUTTON = 'button[class*="continue-button"], button[class*="sign_in_panel_wide-sign"]'
+# An account's first generation shows a one-time acknowledgment (you are
+# responsible for uploads and have the rights to them) after the submit click
+# and before the request is sent. The account owner agrees to it.
+COMPLIANCE = '[class*="aigc-compliance-confirmation"]'
+COMPLIANCE_AGREE = f"{COMPLIANCE} .lv-modal-footer button.lv-btn-primary"
 # Promotions and notices arrive as modal dialogs at random times after load
-# and swallow clicks. Any modal without a form or sign-in panel is one.
+# and swallow clicks. Any modal without a form, sign-in panel or the
+# acknowledgment is one.
 POPUP = (
     '.lv-modal-wrapper:not(:has(input)):not(:has([class*="login"])):not(:has([class*="sign_in"]))'
+    ':not(:has([class*="aigc-compliance-confirmation"]))'
 )
 COMBOBOX = '[role="combobox"]'
 MODEL_OPTION = '[data-selector-option="model"][data-model-key="{key}"]'
@@ -342,8 +349,12 @@ class BrowserManager:
                 raise BrowserError("browser exposed no context")
             context = browser.contexts[0]
             page = self._pick_page(context) or await context.new_page()
-            # Close promo dialogs whenever one would block the next action.
+            # Close promo dialogs whenever one would block the next action,
+            # and agree to the generation acknowledgment if it does.
             await page.add_locator_handler(page.locator(POPUP), self._close_popup, no_wait_after=True)
+            await page.add_locator_handler(
+                page.locator(f".lv-modal-wrapper:has({COMPLIANCE})"), lambda _: self._agree_compliance(page), no_wait_after=True
+            )
             session = AccountBrowser(
                 account_id=account_id,
                 profile_id=profile.id,
@@ -1062,7 +1073,7 @@ class BrowserManager:
                     url_before = page.url
                     clicked = True
                     await submit.click()
-                    if await capture.wait(self.submit_timeout) or capture.requests:
+                    if await self._await_generate(page, capture):
                         break
                     # The first click on a fresh page can create a workspace
                     # without submitting; only then is a second click safe.
@@ -1082,6 +1093,32 @@ class BrowserManager:
                     "the outcome of the submission is unknown; check with the operator before retrying"
                 ) from None
             raise
+
+    async def _await_generate(self, page: Page, capture: _GenerateCapture) -> bool:
+        """Wait for the generate request after a submit click, agreeing to the
+        one-time acknowledgment if Dreamina asks first."""
+        deadline = time.monotonic() + self.submit_timeout
+        agreed = False
+        while True:
+            remaining = deadline - time.monotonic()
+            if await capture.wait(max(0.01, min(1.5, remaining))) or capture.requests:
+                return True
+            if not agreed and await self._agree_compliance(page):
+                agreed = True
+                deadline = time.monotonic() + self.submit_timeout
+            elif remaining <= 0:
+                return False
+
+    async def _agree_compliance(self, page: Page) -> bool:
+        agree = page.locator(COMPLIANCE_AGREE).filter(visible=True).first
+        try:
+            if not await agree.count():
+                return False
+            await agree.click(timeout=3_000)
+        except PlaywrightTimeoutError:
+            return False
+        log.info("agreed to the account's generation acknowledgment")
+        return True
 
     def _uncertain(self, capture: _GenerateCapture, reason: str, warnings: list[str] | None = None) -> GenerationOutcome:
         request = _request_body(capture.requests[0]) if capture.requests else {}

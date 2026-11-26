@@ -23,6 +23,21 @@ log = logging.getLogger(__name__)
 TERMINAL = {"succeeded", "failed"}
 
 
+# Reasons Dreamina gives when it discards a finished render. These are its
+# own content checks; the attempt is not charged.
+RENDER_FAILURES = {
+    "OutputAudioCopyright": "the generated soundtrack was flagged as copyrighted music",
+}
+
+
+def render_failure(code: str | None, reason: str | None) -> str:
+    detail = RENDER_FAILURES.get(reason or "") or (reason and f"reason {reason}")
+    message = f"the generation failed while rendering (code {code})"
+    if detail:
+        message += f": {detail}"
+    return message + "; nothing was charged, and retrying usually works" if detail in RENDER_FAILURES.values() else message
+
+
 def job_spec(job: dict[str, Any]) -> GenerationSpec:
     """Rebuild the validated generation from a stored job row."""
     return validate_generation(
@@ -268,7 +283,7 @@ class JobQueue:
                 state = parse_history(record)
                 if state.failed:
                     self.db.update_job(job_id, credits_used=state.credits_used or 0)
-                    self._fail(job_id, "upstream_rejected", f"the generation failed while rendering (code {state.fail_code})")
+                    self._fail(job_id, "upstream_rejected", render_failure(state.fail_code, state.fail_msg))
                     return
                 if state.succeeded:
                     self.db.update_job(
