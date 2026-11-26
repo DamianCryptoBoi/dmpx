@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -140,6 +141,21 @@ class AccountBrowser:
     context: BrowserContext
     page: Page
     last_used: float = field(default_factory=time.time)
+    # API hosts this session's pages call, by kind, with request counts.
+    api_hosts: dict[str, Counter] = field(default_factory=lambda: {"commerce": Counter(), "mweb": Counter()})
+
+    def note_request(self, url: str) -> None:
+        parts = urlsplit(url)
+        if not parts.netloc.endswith(".capcut.com"):
+            return
+        if parts.path.startswith("/commerce/"):
+            self.api_hosts["commerce"][parts.netloc] += 1
+        elif parts.path.startswith("/mweb/"):
+            self.api_hosts["mweb"][parts.netloc] += 1
+
+    def hosts(self) -> dict[str, str]:
+        """The most used host of each kind (the region's main cluster)."""
+        return {kind: counts.most_common(1)[0][0] for kind, counts in self.api_hosts.items() if counts}
 
 
 def prompt_plan(spec: GenerationSpec) -> list[tuple[str, Any]]:
@@ -337,6 +353,7 @@ class BrowserManager:
                 context=context,
                 page=page,
             )
+            context.on("request", lambda request: session.note_request(request.url))
             self._sessions[account_id] = session
             return session
         except BaseException:
@@ -534,10 +551,16 @@ class BrowserManager:
         await self._enter_prompt(page, spec)
 
     async def _export_cookies(self, session: AccountBrowser) -> tuple[Path, str]:
+        # The page calls its region's credit API shortly after load; give it
+        # a moment so the session is saved with the right hosts.
+        for _ in range(16):
+            if session.api_hosts["commerce"]:
+                break
+            await session.page.wait_for_timeout(500)
         cookies = await session.context.cookies("https://dreamina.capcut.com")
         user_agent = await session.page.evaluate("navigator.userAgent")
         path = self.settings.data_dir / "accounts" / session.account_id / "cookies.json"
-        save_cookie_file(path, cookies, user_agent)
+        save_cookie_file(path, cookies, user_agent, session.hosts())
         return path, user_agent
 
     # navigation and login ---------------------------------------------

@@ -22,6 +22,34 @@ DEFAULT_UA = (
 )
 COMMERCE_HOST = "commerce-api-sg.capcut.com"
 MWEB_HOST = "mweb-api-sg.capcut.com"
+# Each account is served by its region's cluster (the store-idc cookie): a US
+# account's session is "login error" on the Singapore hosts. Hosts seen in the
+# browser's own traffic are saved with the session and win; this table covers
+# sessions saved without them.
+REGION_HOSTS = {
+    "alisg": (COMMERCE_HOST, MWEB_HOST),
+    "useast5": ("commerce-us-ttp2.us.capcut.com", "dreamina-api-us-ttp2.us.capcut.com"),
+}
+
+
+@dataclass(frozen=True)
+class ApiHosts:
+    commerce: str = COMMERCE_HOST
+    mweb: str = MWEB_HOST
+
+
+def _upstream_host(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.endswith(".capcut.com") and "/" not in value else None
+
+
+def resolve_hosts(cookies: list[dict[str, Any]], saved: dict[str, Any] | None = None) -> ApiHosts:
+    """API hosts for a session: saved from its traffic, else by region, else Singapore."""
+    commerce, mweb = REGION_HOSTS.get(_cookie_value(cookies, ("store-idc",)) or "", (COMMERCE_HOST, MWEB_HOST))
+    saved = saved if isinstance(saved, dict) else {}
+    return ApiHosts(
+        commerce=_upstream_host(saved.get("commerce")) or commerce,
+        mweb=_upstream_host(saved.get("mweb")) or mweb,
+    )
 
 
 class UpstreamError(Exception):
@@ -90,23 +118,33 @@ class Credits:
     purchase: int = 0
 
 
-def load_cookie_file(path: Path) -> tuple[list[dict[str, Any]], str]:
+def _read_cookie_file(path: Path) -> tuple[list[dict[str, Any]], str, dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict):
         cookies = data.get("cookies", [])
         user_agent = data.get("user_agent") or DEFAULT_UA
+        hosts = data.get("hosts") or {}
     else:
-        cookies = data
-        user_agent = DEFAULT_UA
+        cookies, user_agent, hosts = data, DEFAULT_UA, {}
     if not isinstance(cookies, list):
         raise ValueError("cookie file must contain a list")
+    return cookies, user_agent, hosts
+
+
+def load_cookie_file(path: Path) -> tuple[list[dict[str, Any]], str]:
+    cookies, user_agent, _hosts = _read_cookie_file(path)
     return cookies, user_agent
 
 
-def save_cookie_file(path: Path, cookies: list[dict[str, Any]], user_agent: str) -> None:
+def save_cookie_file(
+    path: Path, cookies: list[dict[str, Any]], user_agent: str, hosts: dict[str, str] | None = None
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
-    temp.write_text(json.dumps({"cookies": cookies, "user_agent": user_agent}, indent=2) + "\n", encoding="utf-8")
+    data: dict[str, Any] = {"cookies": cookies, "user_agent": user_agent}
+    if hosts:
+        data["hosts"] = hosts
+    temp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     os.chmod(temp, 0o600)
     os.replace(temp, path)
     os.chmod(path, 0o600)
@@ -145,9 +183,11 @@ class DreaminaHTTP:
         *,
         transport: httpx.AsyncBaseTransport | None = None,
         timeout: float = 60.0,
+        hosts: ApiHosts | None = None,
     ):
         self.cookies = cookies
         self.user_agent = user_agent or DEFAULT_UA
+        self.hosts = hosts or resolve_hosts(cookies)
         self.region = (
             _cookie_value(cookies, ("store-country-code", "loc", "region")) or "vn"
         ).upper()
@@ -179,8 +219,8 @@ class DreaminaHTTP:
     def from_cookie_file(
         cls, path: Path, *, transport: httpx.AsyncBaseTransport | None = None
     ) -> "DreaminaHTTP":
-        cookies, user_agent = load_cookie_file(path)
-        return cls(cookies, user_agent, transport=transport)
+        cookies, user_agent, hosts = _read_cookie_file(path)
+        return cls(cookies, user_agent, transport=transport, hosts=resolve_hosts(cookies, hosts))
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -274,7 +314,7 @@ class DreaminaHTTP:
         raise UpstreamRejected(message, status=status)
 
     async def credits(self) -> Credits:
-        status, payload = await self.post(COMMERCE_HOST, "/commerce/v1/benefits/user_credit", {})
+        status, payload = await self.post(self.hosts.commerce, "/commerce/v1/benefits/user_credit", {})
         self._raise_for_ret(payload, status)
         raw = payload.get("response") or "{}"
         parsed = json.loads(raw) if isinstance(raw, str) else raw
@@ -287,7 +327,7 @@ class DreaminaHTTP:
     async def benefit_prices(self) -> dict[str, int]:
         """Per-unit credit prices for every video benefit type."""
         status, payload = await self.post(
-            COMMERCE_HOST,
+            self.hosts.commerce,
             "/commerce/v3/resource/benefit_metadata",
             {"query_list": [{"resource_type": "aigc", "resource_id": "generate_video", "benefit_type_list": []}]},
         )
@@ -305,7 +345,7 @@ class DreaminaHTTP:
 
     async def history_by_ids(self, submit_ids: list[str]) -> dict[str, Any]:
         status, payload = await self.post(
-            MWEB_HOST, "/mweb/v1/get_history_by_ids", {"submit_ids": submit_ids}
+            self.hosts.mweb, "/mweb/v1/get_history_by_ids", {"submit_ids": submit_ids}
         )
         self._raise_for_ret(payload, status)
         data = payload.get("data") or {}
@@ -329,7 +369,7 @@ class DreaminaHTTP:
 
     async def recent_history(self, count: int = 20) -> list[dict[str, Any]]:
         status, payload = await self.post(
-            MWEB_HOST,
+            self.hosts.mweb,
             "/mweb/v1/get_history",
             {"count": count, "history_type_list": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]},
         )
