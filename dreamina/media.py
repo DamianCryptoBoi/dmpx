@@ -55,10 +55,9 @@ async def save_upload(
 
     Returns (path, detected_mime, size, sha256).
     """
+    # The declared Content-Type is ignored: clients send image/jpg,
+    # binary/octet-stream or nothing at all. The bytes decide (see _sniff).
     allowed = IMAGE_TYPES if kind == "image" else AUDIO_TYPES
-    declared = (upload.content_type or "").split(";", 1)[0].strip().lower()
-    if declared and declared not in allowed:
-        raise UploadError(f"unsupported {kind} content type: {declared}")
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()

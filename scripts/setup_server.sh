@@ -96,10 +96,23 @@ fi
 step "ShardX browser engine and fingerprints"
 in_app ".venv/bin/python -c 'from dreamina.config import Settings; from shardx import ShardX; s = Settings.from_env(); s.ensure_dirs(); ShardX(cache_dir=str(s.shardx_cache_dir), profiles_dir=str(s.profiles_dir)).runtime.install(); print(\"ShardX ready in\", s.shardx_cache_dir)'"
 
+# Node.js LTS from nodejs.org (checksum-verified). Ubuntu's npm package drags in
+# hundreds of dependencies; the official tarball is one download.
+install_node() {
+  local base=https://nodejs.org/dist/latest-v22.x sums file
+  sums="$(curl -fsSL "$base/SHASUMS256.txt")"
+  file="$(awk '/linux-x64\.tar\.gz$/ {print $2}' <<<"$sums")"
+  curl -fsSL "$base/$file" -o "/tmp/$file"
+  (cd /tmp && grep "  $file\$" <<<"$sums" | sha256sum -c --quiet -)
+  tar -xzf "/tmp/$file" -C /usr/local --strip-components=1 \
+    --exclude='*/CHANGELOG.md' --exclude='*/LICENSE' --exclude='*/README.md'
+  rm -f "/tmp/$file"
+}
+
 step "PM2"
 if ! command -v pm2 >/dev/null; then
-  command -v npm >/dev/null || apt-get install -y -qq nodejs npm >/dev/null
-  npm install -g pm2 >/dev/null
+  command -v npm >/dev/null || install_node
+  npm install -g pm2 --no-fund --no-audit >/dev/null
 fi
 in_app "pm2 startOrRestart ecosystem.config.cjs --update-env && pm2 save"
 if [[ -d /run/systemd/system ]]; then

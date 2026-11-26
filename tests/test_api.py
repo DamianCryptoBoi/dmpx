@@ -106,7 +106,8 @@ def test_generation_lifecycle_and_idempotency(client, services, dreamina):
         ({**FORM, "duration_seconds": "31"}, None, "between"),
         ({**FORM, "prompt": "@image2"}, None, "@image2"),
         (FORM, [("images", ("a.png", b"not an image", "image/png")), ("audio", ("a.mp3", MP3, "audio/mpeg"))], "supported image"),
-        (FORM, [("images", ("a.gif", b"GIF89a", "image/gif")), ("audio", ("a.mp3", MP3, "audio/mpeg"))], "content type"),
+        (FORM, [("images", ("a.gif", b"GIF89a", "image/gif")), ("audio", ("a.mp3", MP3, "audio/mpeg"))], "supported image"),
+        (FORM, [("images", ("a.png", PNG, "image/png")), ("audio", ("a.m4a", b"\x00\x00\x00\x20ftypM4A ", "audio/mp4"))], "supported audio"),
         ({**FORM, "prompt": "boat"}, files() + [("first_frame", ("f.png", PNG, "image/png"))], "cannot be combined"),
     ],
 )
@@ -258,3 +259,14 @@ def test_non_ascii_credentials_are_rejected_not_crashed(client):
 def test_admin_login_refuses_file_parts(client):
     response = client.post("/admin/login", files={"password": ("p.txt", b"x" * 10, "text/plain")})
     assert response.status_code == 400
+
+
+def test_untyped_file_parts_are_sniffed(client, services):
+    make_ready(services, "alpha")
+    upload = [
+        ("images", ("a.png", PNG, "application/octet-stream")),
+        ("images", ("b.jpg", PNG, "image/jpg")),
+        ("audio", ("a.mp3", MP3, "binary/octet-stream")),
+    ]
+    data = {**FORM, "prompt": "@image1 and @image2 with @audio1"}
+    assert post(client, data=data, upload=upload).status_code == 202

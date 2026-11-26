@@ -241,14 +241,18 @@ class JobQueue:
                 async with self.accounts.client(account) as client:
                     record = await client.history_record(submit_id)
             except SessionExpired as exc:
+                # The generation was already submitted and may be charged, so
+                # this is an unknown outcome, not a safe-to-retry session error.
                 if renewed:
-                    self._fail(job_id, "session_expired", self.accounts.error_text(exc))
+                    self._fail(job_id, "upstream_timeout", f"lost the session while waiting: {self.accounts.error_text(exc)}")
                     return
                 renewed = True
                 try:
                     await self.accounts.login(account_id)
                 except Exception as login_exc:
-                    self._fail(job_id, "session_expired", self.accounts.error_text(login_exc))
+                    self._fail(
+                        job_id, "upstream_timeout", f"lost the session while waiting: {self.accounts.error_text(login_exc)}"
+                    )
                     return
                 continue
             except UpstreamError as exc:
