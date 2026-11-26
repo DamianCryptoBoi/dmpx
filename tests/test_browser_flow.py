@@ -6,6 +6,7 @@ import pytest
 
 from dreamina import browser
 from dreamina.browser import (
+    apply_language,
     BrowserError,
     BrowserManager,
     GenerationRejected,
@@ -298,18 +299,37 @@ async def test_browser_without_devtools_endpoint_fails_clearly(manager):
         def stop(self):
             stopped.append(True)
 
+    saved, created = [], []
+
     class SDK:
         def create_profile(self, platform):
-            return type("Profile", (), {"id": "p1"})()
+            return type("Profile", (), {"id": "p1", "config": {"navigator": {"language": "auto"}, "timezone": "auto"}})()
+
+        def save_profile(self, profile):
+            saved.append(profile.config)
 
         def launch(self, profile, **kwargs):
             return Launched()
 
     manager._sdk = SDK()
+    manager.on_profile_created = lambda account_id, profile_id: created.append((account_id, profile_id))
     with pytest.raises(BrowserError) as excinfo:
         await manager.open("alpha", None)
     assert "--no-sandbox" in str(excinfo.value) and stopped == [True]
     assert not manager.is_open("alpha")
+    # The new profile is reported before anything can fail, and pinned to English.
+    assert created == [("alpha", "p1")]
+    assert saved[0]["navigator"]["language"] == "en-US" and saved[0]["timezone"] == "auto"
+
+
+def test_apply_language_pins_english_and_keeps_auto_timezone():
+    config = {"navigator": {"language": "auto"}, "timezone": "auto"}
+    assert apply_language(config, "en-US") is True
+    assert config["navigator"] == {"language": "en-US", "accept_language": "en-US,en;q=0.9", "languages": ["en-US", "en"]}
+    assert config["icu_locale"] == "en-US" and config["timezone"] == "auto"
+    assert apply_language(config, "en-US") is False  # already pinned: no rewrite
+    untouched = {"navigator": {"language": "auto"}}
+    assert apply_language(untouched, "") is False and untouched == {"navigator": {"language": "auto"}}
 
 
 async def test_open_browsers_stay_within_the_concurrency_limit(manager):

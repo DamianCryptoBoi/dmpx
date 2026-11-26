@@ -66,6 +66,7 @@ class Settings:
     log_level: str
     trusted_proxies: tuple[str, ...] = ()
     browser_args: tuple[str, ...] = ()
+    browser_language: str = "en-US"
     warnings: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
@@ -146,6 +147,7 @@ class Settings:
             log_level=(get("DREAMINA_LOG_LEVEL") or "INFO").upper(),
             trusted_proxies=tuple(part.strip() for part in (get("DREAMINA_TRUSTED_PROXIES") or "").split(",") if part.strip()),
             browser_args=tuple((get("DREAMINA_BROWSER_ARGS") or "").split()),
+            browser_language=(get("DREAMINA_BROWSER_LANGUAGE", "en-US") or "").strip(),
             warnings=tuple(warnings),
         )
 

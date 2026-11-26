@@ -51,6 +51,8 @@ class AccountService:
         self.env = env
         self.browsers = browsers
         self.http_factory = http_factory
+        # Persist a new browser profile at once, so retries reuse the same device.
+        browsers.on_profile_created = lambda account_id, profile_id: self.db.update_account(account_id, profile_id=profile_id)
         # Accounts with an in-flight generation; maintained by the job queue.
         self.busy: set[str] = set()
         self._logins: dict[str, asyncio.Task] = {}

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlsplit
 
-from patchright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
+from patchright.async_api import Browser, BrowserContext, Locator, Page, Playwright, async_playwright
 from patchright.async_api import TimeoutError as PlaywrightTimeoutError
 from shardx import ShardX
 
@@ -34,6 +34,19 @@ TEXTAREA = '[data-testid="dreamina.generator"] textarea'
 PROMPT_FIELD = f"{EDITOR}, {TEXTAREA}"
 SUBMIT = '[data-testid="dreamina.generator.submit"]'
 GUEST_SHELL = '[data-main-frame-2026-guest-top-actions-ready="true"]'
+# The sign-in dialog comes in several layouts, all with the same email and
+# password fields. The email field is either inline, or behind an email
+# method row: in the newer panel the only method button without
+# data-login-method (google/apple/tiktok/facebook/scan carry one); in the
+# older panel the only row alone in its group (third-party rows share one).
+LOGIN_PANEL = '[class*="login-methods-panel"]'
+EMAIL_METHOD = (
+    f'{LOGIN_PANEL} button[class*="login-method-button"]:not([data-login-method]), '
+    '[class*="third_part_sign_in_expand-wrapper"] > [class*="third_part_sign_in_expand-button"]:only-child'
+)
+EMAIL_INPUT = 'input[type="email"][name="username"]'
+PASSWORD_INPUT = 'input[type="password"][name="password"]'
+CONTINUE_BUTTON = 'button[class*="continue-button"], button[class*="sign_in_panel_wide-sign"]'
 COMBOBOX = '[role="combobox"]'
 MODEL_OPTION = '[data-selector-option="model"][data-model-key="{key}"]'
 MODEL_PANEL_OPTIONS = '[data-selector-panel="true"] [data-selector-option="model"]'
@@ -225,6 +238,24 @@ class _GenerateCapture:
                 pass
 
 
+def apply_language(config: dict[str, Any], language: str) -> bool:
+    """Pin a profile's UI language (e.g. en-US). The timezone stays on
+    ShardX's "auto", so it keeps matching the exit IP. Returns True if the
+    config changed. An empty language leaves ShardX's IP-based choice."""
+    if not language:
+        return False
+    base = language.split("-", 1)[0]
+    languages = [language, base] if base != language else [language]
+    accept = f"{language},{base};q=0.9" if base != language else language
+    navigator = config.setdefault("navigator", {})
+    wanted = {"language": language, "accept_language": accept, "languages": languages}
+    if all(navigator.get(key) == value for key, value in wanted.items()) and config.get("icu_locale") == language:
+        return False
+    navigator.update(wanted)
+    config["icu_locale"] = language
+    return True
+
+
 class BrowserManager:
     submit_timeout = 60.0
 
@@ -235,6 +266,9 @@ class BrowserManager:
         self._locks: dict[str, asyncio.Lock] = {}
         self._sdk: ShardX | None = None
         self._closed = False
+        # Called with (account_id, profile_id) when a new profile is created,
+        # so a failed first login does not leave the next attempt a new device.
+        self.on_profile_created: Callable[[str, str], None] | None = None
 
     @property
     def sdk(self) -> ShardX:
@@ -263,6 +297,8 @@ class BrowserManager:
 
         await self._make_room(account_id)
         profile = await asyncio.to_thread(self._open_or_create_profile, account_id, profile_id)
+        if profile.id != profile_id and self.on_profile_created is not None:
+            self.on_profile_created(account_id, profile.id)
         launched = await asyncio.to_thread(
             self.sdk.launch,
             profile,
@@ -308,12 +344,17 @@ class BrowserManager:
             raise
 
     def _open_or_create_profile(self, account_id: str, profile_id: str | None):
+        profile = None
         if profile_id:
             try:
-                return self.sdk.open_profile(profile_id)
+                profile = self.sdk.open_profile(profile_id)
             except Exception:
                 log.warning("profile %s missing; creating a replacement for %s", profile_id, account_id)
-        return self.sdk.create_profile(platform=self.settings.shard_platform)
+        if profile is None:
+            profile = self.sdk.create_profile(platform=self.settings.shard_platform)
+        if apply_language(profile.config, self.settings.browser_language):
+            self.sdk.save_profile(profile)
+        return profile
 
     def delete_profile(self, profile_id: str) -> None:
         try:
@@ -508,40 +549,57 @@ class BrowserManager:
             return await shell.first.is_visible()
         return False
 
-    async def _login_flow(self, page: Page, email: str, password: str) -> None:
+    async def _open_email_form(self, page: Page) -> Locator:
+        """Open the sign-in dialog and return the visible email field."""
         shell = page.locator(GUEST_SHELL).first
         if not await shell.count():
             raise LoginFailed("guest login control not found")
-        await shell.evaluate(
-            """el => { const t = el.querySelector('[role="button"], [class*="login-button"]'); (t || el).click(); }"""
-        )
-        email_input = page.locator('input[type="email"][name="username"]').first
-        try:
-            await email_input.wait_for(state="visible", timeout=15_000)
-        except PlaywrightTimeoutError as exc:
-            raise LoginFailed("email login form did not appear") from exc
+        trigger = shell.locator("button").first
+        # A real click: a scripted click on the wrapper only opens a promo popover.
+        await (trigger if await trigger.count() else shell).click()
+        email_input = page.locator(EMAIL_INPUT).first
+        email_method = page.locator(EMAIL_METHOD).filter(visible=True).first
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if await email_input.is_visible():
+                return email_input
+            if await email_method.count() and await email_method.is_visible():
+                await email_method.click()
+                try:
+                    await email_input.wait_for(state="visible", timeout=10_000)
+                except PlaywrightTimeoutError:
+                    break
+                return email_input
+            await page.wait_for_timeout(500)
+        raise LoginFailed("email login form did not appear")
+
+    async def _login_flow(self, page: Page, email: str, password: str) -> None:
+        email_input = await self._open_email_form(page)
         try:
             await email_input.fill(email)
         except Exception:
             # Playwright error text echoes the filled value; never surface it.
             raise LoginFailed("could not enter the account email") from None
-        await page.locator('button[class*="continue-button"]').first.click()
 
-        password_input = page.locator('input[type="password"][name="password"]').first
-        try:
-            await password_input.wait_for(state="visible", timeout=20_000)
-        except PlaywrightTimeoutError as exc:
-            if await self._captcha_visible(page):
-                raise LoginAttention("verification challenge appeared during login") from exc
-            if not await self._is_logged_out(page):
-                return
-            raise LoginAttention("password step was not offered; account may require verification") from exc
+        # Some layouts show the password field with the email; others ask
+        # for it after continuing.
+        password_input = page.locator(PASSWORD_INPUT).first
+        if not await password_input.is_visible():
+            await page.locator(CONTINUE_BUTTON).filter(visible=True).first.click()
+            try:
+                await password_input.wait_for(state="visible", timeout=20_000)
+            except PlaywrightTimeoutError as exc:
+                if await self._captcha_visible(page):
+                    raise LoginAttention("verification challenge appeared during login") from exc
+                if not await self._is_logged_out(page):
+                    return
+                raise LoginAttention("password step was not offered; account may require verification") from exc
 
         try:
             await password_input.fill(password)
         except Exception:
             raise LoginFailed("could not enter the account password") from None
-        await page.locator('button[class*="continue-button"]').first.click()
+        await page.locator(CONTINUE_BUTTON).filter(visible=True).first.click()
         deadline = time.time() + 60
         while time.time() < deadline:
             if await self._captcha_visible(page):
