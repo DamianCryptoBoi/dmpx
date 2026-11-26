@@ -271,6 +271,13 @@ class BrowserManager:
         )
         playwright = None
         try:
+            if not launched.cdp_url:
+                # Typically Chromium aborting because its sandbox is refused,
+                # as under Docker's default seccomp profile on Linux hosts.
+                raise BrowserError(
+                    "the browser started without a DevTools endpoint; if this runs in Docker, "
+                    "set DREAMINA_BROWSER_ARGS=--no-sandbox"
+                )
             playwright = await async_playwright().start()
             browser = await playwright.chromium.connect_over_cdp(launched.cdp_url)
             if not browser.contexts:

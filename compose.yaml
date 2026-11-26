@@ -35,8 +35,9 @@ services:
     environment:
       DREAMINA_MAX_CONCURRENT_JOBS: ${DREAMINA_MAX_CONCURRENT_JOBS:-2}
       DREAMINA_BROWSER_IDLE_SECONDS: ${DREAMINA_BROWSER_IDLE_SECONDS:-600}
-      # Only if the browser fails with "No usable sandbox": --no-sandbox
-      DREAMINA_BROWSER_ARGS: ${DREAMINA_BROWSER_ARGS:-}
+      # Docker's default seccomp profile refuses Chromium's sandbox on Linux
+      # hosts; set DREAMINA_BROWSER_ARGS= (empty) in .env where it works.
+      DREAMINA_BROWSER_ARGS: ${DREAMINA_BROWSER_ARGS---no-sandbox}
       # cloudflared's container may report the visitor's address; nobody else.
       DREAMINA_TRUSTED_PROXIES: cloudflared
     logging: *logging

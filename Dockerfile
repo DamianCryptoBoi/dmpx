@@ -26,7 +26,8 @@ ENV PATH=/app/.venv/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     DREAMINA_DATA_DIR=/data \
     DREAMINA_ENV_FILE=/data/.env \
-    DREAMINA_SHARDX_CACHE_DIR=/opt/shardx
+    DREAMINA_SHARDX_CACHE_DIR=/opt/shardx \
+    DREAMINA_BROWSER_ARGS=--no-sandbox
 WORKDIR /app
 COPY --from=build /app/.venv /app/.venv
 

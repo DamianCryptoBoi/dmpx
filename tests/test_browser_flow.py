@@ -287,3 +287,26 @@ def test_only_the_exact_generate_endpoint_counts_as_submission():
     assert browser._is_generate(base + "generate?aid=513641", "POST")
     assert not browser._is_generate(base + "generate_accelerate?aid=513641", "POST")
     assert not browser._is_generate(base + "generate", "GET")
+
+
+async def test_browser_without_devtools_endpoint_fails_clearly(manager):
+    stopped = []
+
+    class Launched:
+        cdp_url = None
+
+        def stop(self):
+            stopped.append(True)
+
+    class SDK:
+        def create_profile(self, platform):
+            return type("Profile", (), {"id": "p1"})()
+
+        def launch(self, profile, **kwargs):
+            return Launched()
+
+    manager._sdk = SDK()
+    with pytest.raises(BrowserError) as excinfo:
+        await manager.open("alpha", None)
+    assert "--no-sandbox" in str(excinfo.value) and stopped == [True]
+    assert not manager.is_open("alpha")

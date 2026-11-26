@@ -151,10 +151,11 @@ The image holds Python, Chromium's system libraries and the ShardX engine; the
 `sdbf_data` volume holds everything that must survive (`/data/.env` with the
 secrets and account passwords, the job database, browser profiles). The
 container runs as a non-root user with `init`, 1 GB of shared memory for
-Chromium, and rotated logs. Chromium keeps its own sandbox; if a host's
-kernel policy refuses it (the browser fails with "No usable sandbox"), set
-`DREAMINA_BROWSER_ARGS=--no-sandbox` in `.env` and rely on the container as
-the isolation boundary.
+Chromium, and rotated logs. Chromium runs with `--no-sandbox`: on Linux hosts
+Docker's default seccomp profile refuses the namespaces its sandbox needs
+(seen on Ubuntu 22.04 with Docker 29), so the unprivileged container is the
+isolation boundary. On a host where the sandbox works, set
+`DREAMINA_BROWSER_ARGS=` (empty) in `.env`.
 
 The dashboard listens on the server's `127.0.0.1:8000` only. Without Cloudflare,
 reach it with `ssh -N -L 8000:127.0.0.1:8000 <server>` and open
