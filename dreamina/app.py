@@ -86,7 +86,7 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
             await svc.browsers.close_all()
             svc.db.close()
 
-    app = FastAPI(title="Dreamina proxy", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="SDBF", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.services = services or build_services(settings)
     app.mount("/admin/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
     app.include_router(api.router)
@@ -117,9 +117,5 @@ def create_app(settings: Settings | None = None, *, services: Services | None = 
         first = exc.errors()[0] if exc.errors() else {}
         where = ".".join(str(part) for part in first.get("loc", ()) if part not in {"query", "path", "body"})
         return api.error_response(400, "invalid_input", f"{where}: {first.get('msg', 'invalid value')}".strip(": "))
-
-    @app.get("/", include_in_schema=False)
-    async def root():
-        return RedirectResponse("/admin", status_code=303)
 
     return app

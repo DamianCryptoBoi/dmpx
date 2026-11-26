@@ -929,7 +929,7 @@ class BrowserManager:
                 return self._uncertain(capture, f"generate outcome unreadable ({type(exc).__name__})", warnings)
             if clicked or capture.requests:
                 raise SubmitUncertain(
-                    "submit was clicked but its outcome is unknown; check Dreamina history before retrying"
+                    "the outcome of the submission is unknown; check with the operator before retrying"
                 ) from None
             raise
 
@@ -964,8 +964,8 @@ class BrowserManager:
             return self._uncertain(capture, "generate response was unreadable", warnings)
         ret = str(payload.get("ret"))
         if ret != "0":
-            message = str(payload.get("errmsg") or "Dreamina rejected the generation")
-            raise GenerationRejected(f"Dreamina rejected the generation (ret={ret}): {message}"[:300], ret=ret)
+            message = str(payload.get("errmsg") or "no reason given")
+            raise GenerationRejected(f"the generation was rejected (code {ret}): {message}"[:300], ret=ret)
         submit_id = (
             ((payload.get("data") or {}).get("aigc_data") or {}).get("submit_id")
             or capture.submit_id

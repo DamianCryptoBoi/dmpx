@@ -245,7 +245,6 @@ def public_catalog() -> list[dict[str, Any]]:
         catalog.append(
             {
                 "name": model.name,
-                "dreamina_model_key": model.dreamina_key,
                 "duration_seconds": {"min": model.min_duration, "max": model.max_duration},
                 "resolutions": list(model.resolutions),
                 "aspect_ratios": list(ASPECT_RATIOS),

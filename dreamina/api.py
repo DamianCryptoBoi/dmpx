@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 import sqlite3
 import uuid
@@ -44,7 +45,7 @@ def services(request: Request) -> Any:
 def require_api_key(request: Request) -> None:
     settings = services(request).settings
     if not settings.api_key:
-        raise ApiError(503, "api_disabled", "DREAMINA_API_KEY is not configured")
+        raise ApiError(503, "api_disabled", "the API key is not configured on the server")
     if not api_key_matches(bearer_token(request.headers.get("authorization")), settings.api_key):
         raise ApiError(401, "unauthorized", "missing or invalid API key")
 
@@ -218,7 +219,22 @@ async def create_generation(svc: Any, form: FormData, idempotency_key: str | Non
 
 
 # representations ---------------------------------------------------------------
-def public_job(job: dict[str, Any], *, base: str = "/v1/generations") -> dict[str, Any]:
+_BRANDS = re.compile(r"dreamina|capcut", re.IGNORECASE)
+
+# Client-facing text for failures whose internal detail means nothing to a caller.
+_PUBLIC_ERRORS = {
+    "session_expired": "the generation could not start; nothing was charged",
+    "no_account_available": "no generation capacity was available",
+}
+
+
+def _neutral(text: str | None) -> str | None:
+    """Last line of defence: no upstream product name reaches API clients."""
+    return _BRANDS.sub("upstream", text) if text else text
+
+
+def public_job(job: dict[str, Any], *, base: str = "/v1/generations", internal: bool = False) -> dict[str, Any]:
+    """API view of a job. `internal` adds operator-only detail for the dashboard."""
     try:
         estimate = estimate_credits(get_model(job["model"]), int(job["duration_seconds"]), job["resolution"])
     except ValidationError:
@@ -233,8 +249,13 @@ def public_job(job: dict[str, Any], *, base: str = "/v1/generations") -> dict[st
             media = "pending"
     error = None
     if job["status"] == "failed":
-        error = {"code": job["error_code"] or "upstream_rejected", "message": job["error_message"] or ""}
-    return {
+        code = job["error_code"] or "upstream_rejected"
+        message = job["error_message"] or ""
+        if not internal:
+            message = _PUBLIC_ERRORS.get(code) or _neutral(message)
+        error = {"code": code, "message": message}
+    notes = job["error_message"] if job["status"] != "failed" else None
+    view = {
         "id": job["id"],
         "status": job["status"],
         "model": job["model"],
@@ -249,18 +270,19 @@ def public_job(job: dict[str, Any], *, base: str = "/v1/generations") -> dict[st
             "first_frame": bool(job["first_frame_path"]),
             "last_frame": bool(job["last_frame_path"]),
         },
-        "account_id": job["account_id"],
-        "submit_id": job["submit_id"],
         "credits_estimate": estimate,
         "credits_used": job["credits_used"],
         "media": media,
         "content_url": f"{base}/{job['id']}/content" if media == "ready" else None,
         "error": error,
-        "notes": job["error_message"] if job["status"] != "failed" else None,
+        "notes": notes if internal else _neutral(notes),
         "created_at": job["created_at"],
         "started_at": job["started_at"],
         "finished_at": job["finished_at"],
     }
+    if internal:
+        view.update(account_id=job["account_id"], submit_id=job["submit_id"])
+    return view
 
 
 def media_response(job: dict[str, Any] | None) -> FileResponse:

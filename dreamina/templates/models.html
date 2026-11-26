@@ -1,13 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Models · Dreamina proxy{% endblock %}
+{% block title %}Models · SDBF{% endblock %}
 {% block content %}
 <h1>Models</h1>
-<p class="muted">Prices are credits per second, {{ "read live from Dreamina at " ~ pricing_updated_at if pricing_source == "live" else "from the verified fallback table (live prices not fetched yet)" }}.</p>
+<p class="muted">Prices are credits per second, {{ "read live at " ~ pricing_updated_at if pricing_source == "live" else "from the verified fallback table (live prices not fetched yet)" }}.</p>
 <div class="model-grid">
 {% for model in models %}
   <section class="card">
     <h2>{{ model.name }}</h2>
-    <p class="muted"><code>{{ model.dreamina_model_key }}</code></p>
     <table>
       <thead><tr><th>Resolution</th><th class="num">Per second</th><th class="num">4 s job</th></tr></thead>
       <tbody>

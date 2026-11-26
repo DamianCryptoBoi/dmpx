@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_macros.html" import badge %}
-{% block title %}Accounts · Dreamina proxy{% endblock %}
+{% block title %}Accounts · SDBF{% endblock %}
 {% block content %}
 <h1>Accounts</h1>
 <div class="table-wrap" {% if accounts | selectattr("logging_in") | list %}data-refresh-seconds="5"{% endif %}>

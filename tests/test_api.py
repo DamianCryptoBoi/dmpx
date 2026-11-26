@@ -270,3 +270,33 @@ def test_untyped_file_parts_are_sniffed(client, services):
     ]
     data = {**FORM, "prompt": "@image1 and @image2 with @audio1"}
     assert post(client, data=data, upload=upload).status_code == 202
+
+
+# white label ---------------------------------------------------------------------
+def test_public_surfaces_never_mention_the_upstream(client, services):
+    assert "dreamina" not in client.get("/v1/models", headers=AUTH).text.lower()
+    login_page = client.get("/admin/login").text
+    assert "SDBF" in login_page and "dreamina" not in login_page.lower()
+    assert client.get("/").status_code == 404
+
+
+def test_job_views_hide_internal_detail_from_api_clients(client, services):
+    make_ready(services, "alpha")
+    job = post(client).json()
+    services.db.update_job(
+        job["id"], status="failed", error_code="upstream_rejected", account_id="alpha", submit_id="sub-123",
+        error_message="Dreamina rejected the generation (ret=1): CapCut policy",
+    )
+    body = client.get(f"/v1/generations/{job['id']}", headers=AUTH).json()
+    assert "account_id" not in body and "submit_id" not in body
+    assert body["error"]["code"] == "upstream_rejected"
+    assert "dreamina" not in body["error"]["message"].lower()
+    assert "capcut" not in body["error"]["message"].lower()
+
+    services.db.update_job(job["id"], error_code="session_expired", error_message="account credentials are missing from .env")
+    body = client.get(f"/v1/generations/{job['id']}", headers=AUTH).json()
+    assert body["error"]["message"] == "the generation could not start; nothing was charged"
+
+    login(client)
+    detail = client.get(f"/admin/jobs/{job['id']}").text
+    assert "sub-123" in detail and "credentials are missing" in detail

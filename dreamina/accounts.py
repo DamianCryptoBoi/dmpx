@@ -293,10 +293,10 @@ class AccountService:
         """Fail fast at enqueue time instead of queueing a job nothing can run."""
         usable = self.usable()
         if not usable:
-            raise AccountError("no_account_available", "no enabled account has a usable session", 503)
+            raise AccountError("no_account_available", "no generation capacity is available right now", 503)
         if not any((account["credits"] or 0) >= estimate for account in usable):
             raise AccountError(
-                "insufficient_credits", f"no account has the {estimate} credits this generation needs", 402
+                "insufficient_credits", f"not enough credits for this generation (needs {estimate})", 402
             )
 
     def unavailable_reason(self, estimate: int) -> tuple[str, str] | None:
@@ -318,9 +318,9 @@ class AccountService:
             )
         ]
         if not candidates:
-            return "no_account_available", "no enabled account has a usable session"
+            return "no_account_available", "no generation capacity is available right now"
         if not any(account["credits"] is None or account["credits"] >= estimate for account in candidates):
-            return "insufficient_credits", f"no account has the {estimate} credits this generation needs"
+            return "insufficient_credits", f"not enough credits for this generation (needs {estimate})"
         return None
 
     def pick(self, estimate: int) -> dict[str, Any] | None:

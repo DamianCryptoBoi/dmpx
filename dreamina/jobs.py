@@ -82,7 +82,7 @@ class JobQueue:
                 self._fail(
                     job["id"],
                     "upstream_timeout",
-                    "service restarted during submission; check Dreamina history before retrying",
+                    "the service restarted while submitting; the outcome is unknown, so check with the operator before retrying",
                 )
 
     def _spawn(self, job_id: str, coro) -> None:
@@ -262,7 +262,7 @@ class JobQueue:
                 state = parse_history(record)
                 if state.failed:
                     self.db.update_job(job_id, credits_used=state.credits_used or 0)
-                    self._fail(job_id, "upstream_rejected", f"Dreamina generation failed (fail_code={state.fail_code})")
+                    self._fail(job_id, "upstream_rejected", f"the generation failed while rendering (code {state.fail_code})")
                     return
                 if state.succeeded:
                     self.db.update_job(
@@ -283,7 +283,7 @@ class JobQueue:
                 self._fail(
                     job_id,
                     "upstream_timeout",
-                    "generation did not finish in time; it may still complete in Dreamina history",
+                    "the generation did not finish in time; it may still complete, so check with the operator before retrying",
                 )
                 return
             await asyncio.sleep(self.settings.poll_interval_seconds)

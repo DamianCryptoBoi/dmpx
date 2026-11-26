@@ -150,8 +150,8 @@ async def overview(request: Request):
         "overview.html",
         payload,
         stats=overview_data(svc),
-        failures=[public_job(job) for job in svc.db.recent_failures(5)],
-        recent=[public_job(job) for job in svc.db.list_jobs(limit=8)],
+        failures=[public_job(job, internal=True) for job in svc.db.recent_failures(5)],
+        recent=[public_job(job, internal=True) for job in svc.db.list_jobs(limit=8)],
         warnings=svc.settings.warnings,
     )
 
@@ -243,7 +243,7 @@ async def jobs_page(request: Request, page: int = 1, status: str | None = None):
     status = status if status in {"queued", "submitting", "running", "succeeded", "failed"} else None
     total = svc.db.count_jobs(status)
     jobs = [
-        public_job(job, base="/admin/jobs")
+        public_job(job, base="/admin/jobs", internal=True)
         for job in svc.db.list_jobs(limit=per_page, offset=(page - 1) * per_page, status=status)
     ]
     return render(
@@ -286,7 +286,7 @@ async def job_page(request: Request, job_id: str):
     job = services(request).db.get_job(job_id)
     if job is None:
         raise ApiError(404, "not_found", "generation not found")
-    return render(request, "job.html", payload, job=public_job(job, base="/admin/jobs"))
+    return render(request, "job.html", payload, job=public_job(job, base="/admin/jobs", internal=True))
 
 
 @router.get("/jobs/{job_id}/content")

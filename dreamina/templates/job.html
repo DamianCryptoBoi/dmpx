@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% from "_macros.html" import badge %}
-{% block title %}Job {{ job.id[:10] }} · Dreamina proxy{% endblock %}
+{% block title %}Job {{ job.id[:10] }} · SDBF{% endblock %}
 {% block content %}
 <p><a href="/admin/jobs">← Jobs</a></p>
 <h1>Job <code>{{ job.id }}</code> {{ badge(job.status) }}</h1>
