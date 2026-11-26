@@ -47,6 +47,11 @@ EMAIL_METHOD = (
 EMAIL_INPUT = 'input[type="email"][name="username"]'
 PASSWORD_INPUT = 'input[type="password"][name="password"]'
 CONTINUE_BUTTON = 'button[class*="continue-button"], button[class*="sign_in_panel_wide-sign"]'
+# Promotions and notices arrive as modal dialogs at random times after load
+# and swallow clicks. Any modal without a form or sign-in panel is one.
+POPUP = (
+    '.lv-modal-wrapper:not(:has(input)):not(:has([class*="login"])):not(:has([class*="sign_in"]))'
+)
 COMBOBOX = '[role="combobox"]'
 MODEL_OPTION = '[data-selector-option="model"][data-model-key="{key}"]'
 MODEL_PANEL_OPTIONS = '[data-selector-panel="true"] [data-selector-option="model"]'
@@ -321,6 +326,8 @@ class BrowserManager:
                 raise BrowserError("browser exposed no context")
             context = browser.contexts[0]
             page = self._pick_page(context) or await context.new_page()
+            # Close promo dialogs whenever one would block the next action.
+            await page.add_locator_handler(page.locator(POPUP), self._close_popup, no_wait_after=True)
             session = AccountBrowser(
                 account_id=account_id,
                 profile_id=profile.id,
@@ -622,7 +629,29 @@ class BrowserManager:
                     return True
         return False
 
+    async def _close_popup(self, popup: Locator) -> None:
+        """Close a promo dialog as a person would: click outside it, then
+        Escape, then its own close control."""
+        dialog = popup.first
+        page = dialog.page
+        try:
+            await dialog.click(position={"x": 6, "y": 6}, timeout=2_000, force=True)
+            await page.wait_for_timeout(400)
+            if await dialog.is_visible():
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(400)
+            if await dialog.is_visible():
+                close = dialog.locator('[class*="close"]').filter(visible=True).first
+                if await close.count():
+                    await close.click(timeout=2_000, force=True)
+                    await page.wait_for_timeout(400)
+        except Exception as exc:
+            log.info("could not close a popup: %s", _first_line(exc))
+
     async def _dismiss_overlays(self, page: Page) -> None:
+        popup = page.locator(POPUP)
+        if await popup.count() and await popup.first.is_visible():
+            await self._close_popup(popup)
         for _ in range(6):
             acted = False
             for selector in ('[data-slot="CommerceDrawer_closeButton"]', 'div.lv-modal-wrapper .lv-modal-close-icon'):
@@ -649,6 +678,9 @@ class BrowserManager:
         combo = page.locator(COMBOBOX).nth(index)
         if await combo.get_attribute("aria-disabled") == "true":
             return False
+        # The toolbar scrolls horizontally; a clipped selector does not open.
+        await combo.evaluate("e => e.scrollIntoView({block: 'nearest', inline: 'center'})")
+        await page.wait_for_timeout(250)
         try:
             await combo.click(timeout=3_000)
         except PlaywrightTimeoutError:
@@ -667,6 +699,12 @@ class BrowserManager:
         which can take several seconds on a cold page.
         """
         combos = page.locator(COMBOBOX)
+        # The page renders in another tool first and switches to video
+        # seconds later, so wait for the model selector to exist.
+        try:
+            await page.locator(f"{COMBOBOX} {MODEL_LABEL}").first.wait_for(state="attached", timeout=30_000)
+        except PlaywrightTimeoutError:
+            pass
         # A promo dialog can appear seconds after load and swallow clicks, so
         # dismiss overlays and scan once more before giving up.
         for attempt in range(2):
