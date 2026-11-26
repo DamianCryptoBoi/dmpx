@@ -45,7 +45,7 @@ command -v apt-get >/dev/null || die "only Debian/Ubuntu (apt) is supported"
 step "System packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq curl ca-certificates sudo >/dev/null
+apt-get install -y -qq curl ca-certificates sudo unzip >/dev/null  # ShardX unpacks its engine with unzip
 
 step "Service user: $SERVICE_USER"
 if ! id "$SERVICE_USER" &>/dev/null; then
@@ -132,5 +132,5 @@ Done. Next:
   3. Give your Worker the API key (DREAMINA_API_KEY in $ENV_FILE).
 
 Logs:    sudo -u $SERVICE_USER pm2 logs dreamina-proxy
-Update:  sudo -u $SERVICE_USER git -C $APP_DIR pull && sudo $APP_DIR/scripts/setup_server.sh
+Update:  sudo git -C $APP_DIR -c safe.directory=$APP_DIR pull && sudo $APP_DIR/scripts/setup_server.sh
 EOF

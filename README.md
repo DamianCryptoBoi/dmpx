@@ -131,7 +131,7 @@ dashboard after resolving it in a normal browser), `disabled`.
 ## Deploy on a VPS (Ubuntu/Debian x86_64, no Docker)
 
 ```bash
-sudo git clone <repo> /opt/dreamina
+sudo git clone https://github.com/DamianCryptoBoi/dmpx.git /opt/dreamina
 sudo /opt/dreamina/scripts/setup_server.sh --hostname dreamina.example.com
 ```
 
@@ -147,10 +147,10 @@ sudo /opt/dreamina/scripts/setup_server.sh --hostname dreamina.example.com
    systemd so it starts on boot; then checks `/health`.
 8. Prints the cloudflared ingress rule to add (it never edits your tunnel).
 
-Update after a `git pull`:
+Update (pull as root, then re-run the script; it restores file ownership):
 
 ```bash
-sudo -u dreamina git -C /opt/dreamina pull
+sudo git -C /opt/dreamina -c safe.directory=/opt/dreamina pull
 sudo /opt/dreamina/scripts/setup_server.sh
 ```
 
