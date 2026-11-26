@@ -59,9 +59,8 @@
 
 {% macro result_actions(job, small=true) -%}
 {% if job.media == "ready" %}
-<a class="button ghost {{ 'sm icon-btn' if small }}" href="{{ job.content_url }}" target="_blank" rel="noopener" title="Open video in a new tab">{{ icon("external", 16) }}{% if not small %} Open{% endif %}</a>
-<button type="button" class="ghost {{ 'sm icon-btn' if small }}" data-copy="{{ job.content_url }}" title="Copy video link">{{ icon("link", 16) }}{% if not small %} Copy link{% endif %}</button>
-<a class="button ghost {{ 'sm icon-btn' if small }}" href="{{ job.content_url }}" download="{{ job.id }}.mp4" title="Download MP4">{{ icon("download", 16) }}{% if not small %} Download{% endif %}</a>
+<a class="button ghost {{ 'sm icon-btn' if small }}" href="{{ job.content_url }}" target="_blank" rel="noopener" title="Open the video in a new tab">{{ icon("external", 16) }}{% if not small %} Open video{% endif %}</a>
+<button type="button" class="ghost {{ 'sm icon-btn' if small }}" data-copy-link="/admin/jobs/{{ job.id }}/link" title="Copy a fresh direct link (valid about 6 hours)">{{ icon("link", 16) }}{% if not small %} Copy link{% endif %}</button>
 {% endif %}
 {%- endmacro %}
 

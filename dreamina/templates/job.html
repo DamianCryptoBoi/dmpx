@@ -16,14 +16,15 @@
 <div class="split">
   <div class="grid">
     {% if job.media == "ready" %}
-      <div class="player rise"><video controls preload="metadata" src="{{ job.content_url }}"></video></div>
+      <div class="player rise"><video controls preload="metadata" src="{{ job.video_url }}"></video></div>
       <section class="card rise" style="--i: 1">
         <h3 class="card-title">Result link</h3>
-        <div class="btn-row">{{ result_actions(job, small=false) }}</div>
         <div class="linkbox">
-          <input readonly data-absolute="{{ job.content_url }}" value="{{ job.content_url }}" aria-label="Video link (needs this dashboard's login)">
+          <input readonly value="{{ job.video_url }}" aria-label="Direct video link" id="video-link">
+          <button type="button" class="ghost sm" data-copy-value="#video-link" title="Copy link">{{ icon("link", 16) }} Copy</button>
+          <a class="button ghost sm" href="{{ job.video_url }}" target="_blank" rel="noopener">{{ icon("external", 16) }} Open</a>
         </div>
-        <p class="hint" style="margin: 0.6rem 0 0">Opens while you're signed in here. Your Worker fetches the same video from <code>/v1/generations/{{ job.id }}/content</code> with the API key. Videos stream from the generation service and aren't stored on this server.</p>
+        <p class="hint" style="margin: 0.6rem 0 0">Direct link to the file on the generation service's CDN{% if job.video_url_expires_at %}, valid until {{ when(job.video_url_expires_at) }}{% endif %}. It works anywhere without signing in; this page renews it when you open it. Your Worker gets the same link as <code>video_url</code> from <code>GET /v1/generations/{{ job.id }}</code>. Nothing is stored on this server.</p>
       </section>
     {% else %}
       {{ tile(job, "player") }}

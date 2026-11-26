@@ -90,7 +90,7 @@ def test_generation_lifecycle_and_idempotency(client, services, dreamina):
     done = wait_status(client, job["id"], "succeeded")
     assert done["credits_used"] == 84
     content = client.get(done["content_url"], headers=AUTH)
-    assert content.status_code == 200 and content.headers["content-type"] == "video/mp4"
+    assert content.status_code == 302 and content.headers["location"] == done["video_url"]
     assert client.get(done["content_url"]).status_code == 401
 
     [(account_id, spec)] = services.browsers.generate_calls
@@ -302,64 +302,78 @@ def test_job_views_hide_internal_detail_from_api_clients(client, services):
     assert "sub-123" in detail and "credentials are missing" in detail
 
 
-# streamed results ---------------------------------------------------------------------
-def finished(client, services, dreamina):
+# result links -------------------------------------------------------------------------
+def link(hours: float, name: str = "x") -> str:
+    """A CDN-style link whose path carries its expiry as hex Unix seconds."""
+    expires = int(time.time() + hours * 3600)
+    return f"https://v16-cc.capcut.com/signature/{expires:08x}/video/tos/alisg/{name}.mp4"
+
+
+def finished(client, services, dreamina, url=None):
     make_ready(services, "alpha")
-    dreamina.history["submit-1"] = SUCCESS
+    dreamina.history["submit-1"] = {**SUCCESS, "video_url": url or link(6)}
     job = post(client).json()
     return wait_status(client, job["id"], "succeeded")
 
 
-def test_content_is_streamed_and_never_stored(client, services, dreamina, cdn):
-    services.settings.media_dir.mkdir(parents=True, exist_ok=True)
-    (services.settings.media_dir / "old.mp4").write_bytes(b"left by an older version")
-    services.queue.recover()
+def test_generation_returns_the_direct_link_with_its_expiry(client, services, dreamina):
+    url = link(6, "fresh")
+    done = finished(client, services, dreamina, url)
+    assert done["video_url"] == url and done["video_url_expires_at"].startswith(time.strftime("%Y", time.gmtime()))
+    calls = dreamina.history_calls
+    again = client.get(f"/v1/generations/{done['id']}", headers=AUTH).json()
+    assert again["video_url"] == url and dreamina.history_calls == calls  # still valid: no upstream call
     assert not services.settings.media_dir.exists()
 
-    done = finished(client, services, dreamina)
+
+def test_content_url_redirects_to_the_file_instead_of_relaying_it(client, services, dreamina):
+    url = link(6, "file")
+    done = finished(client, services, dreamina, url)
     response = client.get(done["content_url"], headers=AUTH)
-    assert response.status_code == 200 and response.content == cdn.body
-    assert response.headers["content-type"] == "video/mp4"
-    assert response.headers["content-length"] == str(len(cdn.body))
-    assert cdn.calls == [("https://cdn/x.mp4", None)] and cdn.closed == 1
-    stored = [p for p in services.settings.data_dir.rglob("*") if p.suffix in {".mp4", ".part"}]
-    assert stored == [] and not services.settings.media_dir.exists()
+    assert response.status_code == 302 and response.headers["location"] == url
+    assert response.headers["cache-control"] == "no-store"
+    assert client.get(done["content_url"]).status_code == 401
 
 
-def test_content_passes_byte_ranges_through(client, services, dreamina, cdn):
-    done = finished(client, services, dreamina)
-    response = client.get(done["content_url"], headers={**AUTH, "Range": "bytes=0-3"})
-    assert response.status_code == 206 and response.content == cdn.body[:4]
-    assert response.headers["content-range"] == f"bytes 0-3/{len(cdn.body)}"
+def test_expiring_link_is_renewed_from_history(client, services, dreamina):
+    done = finished(client, services, dreamina, link(0.2, "old"))  # 12 minutes left
+    renewed = link(6, "renewed")
+    dreamina.history["submit-1"] = {**SUCCESS, "video_url": renewed}
+    view = client.get(f"/v1/generations/{done['id']}", headers=AUTH).json()
+    assert view["video_url"] == renewed
+    assert services.db.get_job(done["id"])["output_url"] == renewed
+    assert client.get(done["content_url"], headers=AUTH).headers["location"] == renewed
 
 
-def test_expired_upstream_url_is_refreshed_from_history(client, services, dreamina, cdn):
-    done = finished(client, services, dreamina)
-    cdn.gone.add("https://cdn/x.mp4")
-    dreamina.history["submit-1"] = {**SUCCESS, "video_url": "https://cdn/fresh.mp4"}
-    response = client.get(done["content_url"], headers=AUTH)
-    assert response.status_code == 200 and response.content == cdn.body
-    assert cdn.calls[-1] == ("https://cdn/fresh.mp4", None)
-    assert services.db.get_job(done["id"])["output_url"] == "https://cdn/fresh.mp4"
-
-
-def test_video_gone_upstream_reports_expired(client, services, dreamina, cdn):
-    done = finished(client, services, dreamina)
-    cdn.gone.add("https://cdn/x.mp4")
+def test_video_gone_upstream_reports_expired(client, services, dreamina):
+    done = finished(client, services, dreamina, link(-1, "dead"))
     dreamina.history.pop("submit-1")
     response = client.get(done["content_url"], headers=AUTH)
     assert response.status_code == 410 and response.json()["error"]["code"] == "media_expired"
     view = client.get(f"/v1/generations/{done['id']}", headers=AUTH).json()
-    assert view["status"] == "succeeded" and view["media"] == "expired" and view["content_url"] is None
+    assert view["status"] == "succeeded" and view["media"] == "expired" and view["video_url"] is None
 
 
-def test_upstream_outage_is_retryable_not_expired(client, services, dreamina, cdn):
-    done = finished(client, services, dreamina)
-    cdn.down = True
+def test_upstream_outage_keeps_a_still_valid_link_and_reports_a_dead_one(client, services, dreamina):
+    done = finished(client, services, dreamina, link(0.2, "short"))
+    dreamina.history_down = True
+    assert client.get(done["content_url"], headers=AUTH).status_code == 302  # 12 minutes left: still usable
+    services.db.update_job(done["id"], output_url=link(-1, "dead"))
     response = client.get(done["content_url"], headers=AUTH)
     assert response.status_code == 502 and response.json()["error"]["code"] == "upstream_unavailable"
-    cdn.down = False
-    assert client.get(done["content_url"], headers=AUTH).status_code == 200
+    view = client.get(f"/v1/generations/{done['id']}", headers=AUTH).json()
+    assert view["status"] == "succeeded"  # reading the job never fails on a renewal error
+
+
+def test_link_expiry_parsing():
+    from datetime import datetime, timezone
+    from dreamina.http_client import link_expiry
+
+    assert link_expiry("https://v16-cc.capcut.com/e8ed97661b57a94c/6b084e23/video/tos/alisg/x.mp4") == datetime(
+        2026, 11, 26, 15, 20, 3, tzinfo=timezone.utc
+    )
+    assert link_expiry("https://cdn.example/x.mp4?x-expires=1795706403") == datetime(2026, 11, 26, 15, 20, 3, tzinfo=timezone.utc)
+    assert link_expiry("https://cdn/x.mp4") is None and link_expiry(None) is None
 
 
 def test_login_throttle_uses_client_ip_only_from_trusted_proxy(settings, services):
@@ -391,7 +405,8 @@ def test_history_filters_and_credit_totals(app, services, dreamina):
     make_ready(services, "alpha")
     first = post(client, key="k1").json()
     second = post(client, key="k2", data={**FORM, "prompt": "@image1 second @audio1"}).json()
-    services.db.update_job(first["id"], status="succeeded", account_id="alpha", credits_used=84, output_url="https://cdn/a.mp4", finished_at="2026-01-01T00:00:00+00:00")
+    direct = link(6, "first")
+    services.db.update_job(first["id"], status="succeeded", account_id="alpha", submit_id="sub-a", credits_used=84, output_url=direct, finished_at="2026-01-01T00:00:00+00:00")
     services.db.update_job(second["id"], status="failed", account_id="beta", credits_used=0, error_code="upstream_rejected", error_message="refused")
     login(client)
     usage = services.db.account_usage()
@@ -407,7 +422,11 @@ def test_history_filters_and_credit_totals(app, services, dreamina):
     assert second["id"] in failed and first["id"] not in failed
 
     detail = client.get(f"/admin/jobs/{first['id']}").text
-    assert f"/admin/jobs/{first['id']}/content" in detail and f"/v1/generations/{first['id']}/content" in detail
+    assert direct in detail and f"/v1/generations/{first['id']}" in detail
+    copied = client.get(f"/admin/jobs/{first['id']}/link").json()
+    assert copied["url"] == direct and copied["expires_at"]
+    redirect = client.get(f"/admin/jobs/{first['id']}/content")
+    assert redirect.status_code == 302 and redirect.headers["location"] == direct
     assert "alpha" in detail
 
     accounts = client.get("/admin/accounts").text

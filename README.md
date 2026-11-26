@@ -63,7 +63,7 @@ Every `/v1` call needs `Authorization: Bearer $DREAMINA_API_KEY`. Errors are
 | POST | `/v1/generations` | Queue a generation → `202` + `Location` |
 | GET | `/v1/generations?limit=&offset=&status=` | Recent jobs |
 | GET | `/v1/generations/{id}` | Status, credits, errors |
-| GET | `/v1/generations/{id}/content` | The MP4, streamed from upstream (supports `Range`) |
+| GET | `/v1/generations/{id}/content` | `302` redirect to a fresh direct link to the MP4 |
 | GET | `/v1/credits` | Per-account credits (no emails) |
 
 `POST /v1/generations` takes `multipart/form-data` and an `Idempotency-Key`
@@ -106,19 +106,23 @@ const created = await fetch("https://dreamina.example.com/v1/generations", {
   body: form,
 }).then((r) => r.json());
 // Poll GET /v1/generations/{created.id} until status is "succeeded" or "failed",
-// then fetch content_url with the same Authorization header.
+// then download job.video_url (a direct, pre-signed link; no auth header needed).
 ```
 
 Jobs move `queued → submitting → running → succeeded | failed`. Status is
 polled every 15 s for up to 15 minutes (`DREAMINA_POLL_*`).
 
-Videos are never stored on the server. Each `content_url` request streams the
-file from Dreamina's CDN; when the signed CDN link has expired it is refreshed
-from the account's history first. If the video is gone upstream the endpoint
-returns `410 media_expired`, and a temporary CDN failure returns
-`502 upstream_unavailable` (safe to retry). Uploaded references are deleted
-right after submission; failure screenshots are kept for
-`DREAMINA_MEDIA_RETENTION_DAYS` (7).
+Videos are never stored on or relayed through the server. A succeeded
+generation carries `video_url`, Dreamina's own pre-signed CDN link to the MP4
+(it works from anywhere without cookies), and `video_url_expires_at`. Links
+last about six hours: `GET /v1/generations/{id}` renews one that has under
+30 minutes left, and `content_url` redirects to a fresh link. If the video is
+gone upstream the job shows `media: "expired"` and `content_url` returns
+`410 media_expired`; if a renewal fails while the old link is already dead it
+returns `502 upstream_unavailable` (safe to retry). The link is on a
+`capcut.com` CDN domain, so download it server-side if your users must not see
+it. Uploaded references are deleted right after submission; failure
+screenshots are kept for `DREAMINA_MEDIA_RETENTION_DAYS` (7).
 
 ## Dashboard
 

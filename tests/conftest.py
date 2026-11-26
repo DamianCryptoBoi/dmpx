@@ -11,8 +11,7 @@ import pytest
 from dreamina.app import build_services, create_app
 from dreamina.browser import GenerationOutcome, LoginResult
 from dreamina.config import Settings
-from dreamina import http_client
-from dreamina.http_client import Credits, MediaStream, UpstreamError, UpstreamTimeout
+from dreamina.http_client import Credits
 from dreamina.security import hash_password
 
 ADMIN_PASSWORD = "correct horse battery staple"
@@ -74,6 +73,7 @@ class FakeDreamina:
         self.history: dict[str, dict[str, Any]] = {}
         self.history_calls = 0
         self.expired = False
+        self.history_down = False
 
     def client(self, path: Path) -> "FakeHTTP":
         return FakeHTTP(self, path.parent.name)
@@ -98,7 +98,11 @@ class FakeHTTP:
         return Credits(total=self.state.credits.get(self.account_id, 1000))
 
     async def history_record(self, submit_id):
+        from dreamina.http_client import UpstreamTimeout
+
         self.state.history_calls += 1
+        if self.state.history_down:
+            raise UpstreamTimeout("history unreachable", retryable=True)
         return self.state.history.get(submit_id)
 
     async def benefit_prices(self):
@@ -110,48 +114,6 @@ def write_cookies(path: Path) -> None:
     path.write_text(
         json.dumps({"cookies": [{"name": "_tea_web_id", "value": "1234567890123456789"}], "user_agent": "ua"})
     )
-
-
-class FakeCDN:
-    """Stands in for http_client.open_media: serves bytes, never touches disk."""
-
-    body = b"\x00\x00\x00\x18ftypmp42fake-video"
-
-    def __init__(self):
-        self.calls: list[tuple[str, str | None]] = []
-        self.gone: set[str] = set()
-        self.down = False
-        self.closed = 0
-
-    async def open(self, url, *, range_header=None, **_ignored):
-        self.calls.append((url, range_header))
-        if self.down:
-            raise UpstreamTimeout("media fetch failed: ConnectTimeout", retryable=True)
-        if url in self.gone:
-            raise UpstreamError("media HTTP 403", status=403)
-        body, status = self.body, 200
-        headers = {"accept-ranges": "bytes"}
-        if range_header:
-            start, _, end = range_header.removeprefix("bytes=").partition("-")
-            first, last = int(start), int(end or len(self.body) - 1)
-            body, status = self.body[first : last + 1], 206
-            headers["content-range"] = f"bytes {first}-{last}/{len(self.body)}"
-        headers["content-length"] = str(len(body))
-
-        async def chunks():
-            yield body
-
-        async def close():
-            self.closed += 1
-
-        return MediaStream(status=status, headers=headers, chunks=chunks(), close=close)
-
-
-@pytest.fixture(autouse=True)
-def cdn(monkeypatch) -> FakeCDN:
-    fake = FakeCDN()
-    monkeypatch.setattr(http_client, "open_media", fake.open)
-    return fake
 
 
 @pytest.fixture(autouse=True)

@@ -64,20 +64,33 @@
     input.value = absolute(input.getAttribute("data-absolute"));
     input.addEventListener("focus", () => input.select());
   }
+  // Copy buttons: a fixed path, another field's value, or a fresh direct
+  // link fetched from the dashboard (result links expire).
+  const flash = (button, ok) => {
+    button.classList.add(ok ? "copied" : "failed");
+    const title = button.title;
+    button.title = ok ? "Copied" : "Could not get a link";
+    setTimeout(() => { button.classList.remove("copied", "failed"); button.title = title; }, 1600);
+  };
   document.addEventListener("click", async (event) => {
-    const button = event.target.closest("[data-copy]");
+    const button = event.target.closest("[data-copy], [data-copy-value], [data-copy-link]");
     if (!button) return;
-    const text = absolute(button.getAttribute("data-copy"));
+    let text = null;
+    if (button.hasAttribute("data-copy")) text = absolute(button.getAttribute("data-copy"));
+    if (button.hasAttribute("data-copy-value")) text = ($(button.getAttribute("data-copy-value")) || {}).value || null;
+    if (button.hasAttribute("data-copy-link")) {
+      try {
+        const response = await fetch(button.getAttribute("data-copy-link"), { credentials: "same-origin" });
+        text = response.ok ? (await response.json()).url : null;
+      } catch (_) { text = null; }
+    }
+    if (!text) { flash(button, false); return; }
     try {
       await navigator.clipboard.writeText(text);
+      flash(button, true);
     } catch (_) {
       window.prompt("Copy this link", text);
-      return;
     }
-    button.classList.add("copied");
-    const title = button.title;
-    button.title = "Copied";
-    setTimeout(() => { button.classList.remove("copied"); button.title = title; }, 1400);
   });
 
   // Video tiles load only when played: each one streams from upstream.

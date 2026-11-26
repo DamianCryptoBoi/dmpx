@@ -15,7 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.templating import Jinja2Templates
 
 from .accounts import AccountError
-from .api import ApiError, create_generation, credit_summary, media_response, public_job, read_form, services
+from .api import ApiError, create_generation, credit_summary, media_redirect, public_job, read_form, refresh_link, services
 from .catalog import ASPECT_RATIOS, MODELS, PRICES, public_catalog
 from .security import csrf_matches, verify_password
 
@@ -372,16 +372,35 @@ async def job_page(request: Request, job_id: str):
     job = services(request).db.get_job(job_id)
     if job is None:
         raise ApiError(404, "not_found", "generation not found")
-    return render(
-        request, "job.html", payload, nav="jobs", job=public_job(job, base="/admin/jobs", internal=True), labels=labels(services(request))
-    )
+    svc = services(request)
+    job = await refresh_link(svc, job)
+    return render(request, "job.html", payload, nav="jobs", job=public_job(job, base="/admin/jobs", internal=True), labels=labels(svc))
 
 
 @router.get("/jobs/{job_id}/content")
 async def job_content(request: Request, job_id: str):
     session(request)
     svc = services(request)
-    return await media_response(svc, svc.db.get_job(job_id), request.headers.get("range"))
+    return await media_redirect(svc, svc.db.get_job(job_id))
+
+
+@router.get("/jobs/{job_id}/link")
+async def job_link(request: Request, job_id: str):
+    """A fresh direct link, for the dashboard's copy buttons."""
+    try:
+        session(request)
+    except LoginRequired:
+        return JSONResponse({"error": "login required"}, status_code=401)
+    svc = services(request)
+    job = svc.db.get_job(job_id)
+    if job is None or job["status"] != "succeeded" or not job["output_url"]:
+        return JSONResponse({"error": "no video link"}, status_code=404)
+    try:
+        job = await refresh_link(svc, job, strict=True)
+    except ApiError as exc:
+        return JSONResponse({"error": exc.message}, status_code=exc.status)
+    view = public_job(job, internal=True)
+    return {"url": view["video_url"], "expires_at": view["video_url_expires_at"]}
 
 
 @router.get("/models", response_class=HTMLResponse)

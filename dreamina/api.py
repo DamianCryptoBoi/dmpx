@@ -4,26 +4,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shutil
 import sqlite3
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse, StreamingResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.datastructures import FormData, UploadFile
 from starlette.formparsers import MultiPartException
 
 from .accounts import AccountError
 from .catalog import PRICES, ValidationError, estimate_credits, get_model, public_catalog, validate_generation
 from .db import now_iso
-from . import http_client
-from .http_client import UpstreamError, parse_history
+from .http_client import link_expiry, parse_history
 from .media import UploadError, save_upload
 from .security import api_key_matches, bearer_token
 
+log = logging.getLogger(__name__)
 MAX_FORM_FIELDS = 20
 MAX_TEXT_PART_BYTES = 256 * 1024
 
@@ -235,6 +236,10 @@ def _neutral(text: str | None) -> str | None:
     return _BRANDS.sub("upstream", text) if text else text
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat(timespec="seconds") if value else None
+
+
 def public_job(job: dict[str, Any], *, base: str = "/v1/generations", internal: bool = False) -> dict[str, Any]:
     """API view of a job. `internal` adds operator-only detail for the dashboard."""
     try:
@@ -276,6 +281,8 @@ def public_job(job: dict[str, Any], *, base: str = "/v1/generations", internal: 
         "credits_used": job["credits_used"],
         "media": media,
         "content_url": f"{base}/{job['id']}/content" if media == "ready" else None,
+        "video_url": job["output_url"] if media == "ready" else None,
+        "video_url_expires_at": _iso(link_expiry(job["output_url"])) if media == "ready" else None,
         "error": error,
         "notes": notes if internal else _neutral(notes),
         "created_at": job["created_at"],
@@ -287,62 +294,69 @@ def public_job(job: dict[str, Any], *, base: str = "/v1/generations", internal: 
     return view
 
 
-GONE_STATUSES = {403, 404, 410}
+LINK_MARGIN = timedelta(minutes=30)
+MEDIA_GONE = "the video is no longer available"
 
 
-async def media_response(svc: Any, job: dict[str, Any] | None, range_header: str | None = None) -> StreamingResponse:
-    """Stream the result from upstream; the video is never stored here.
+async def refresh_link(svc: Any, job: dict[str, Any], *, strict: bool = False) -> dict[str, Any]:
+    """Return the job with a result link valid for at least LINK_MARGIN.
 
-    Upstream URLs are pre-signed and expire, so a refused URL is refreshed
-    from the generation history once before giving up.
+    Result links are pre-signed and expire (about six hours), so a link that
+    is unknown, expired or about to expire is renewed from the generation
+    history. With `strict`, a renewal failure raises (410 when the video is
+    gone, 502 when upstream is unreachable and the old link is unusable);
+    otherwise the job is returned as it is.
     """
+    if job["status"] != "succeeded" or not job["output_url"] or job["error_code"] == "media_expired":
+        return job
+    expires = link_expiry(job["output_url"])
+    now = datetime.now(timezone.utc)
+    if expires and expires - now > LINK_MARGIN:
+        return job
+    try:
+        await _renew_link(svc, job)
+    except ApiError as exc:
+        if exc.code == "media_expired":
+            if strict:
+                raise
+        elif strict and not (expires and expires > now):
+            raise
+        else:
+            log.info("could not renew the result link for %s: %s", job["id"], exc.message)
+    return svc.db.get_job(job["id"]) or job
+
+
+async def media_redirect(svc: Any, job: dict[str, Any] | None) -> RedirectResponse:
+    """Send the client to the result itself; the video never passes through here."""
     if job is None:
         raise ApiError(404, "not_found", "generation not found")
     if job["status"] != "succeeded":
         raise ApiError(409, "not_ready", f"generation is {job['status']}")
     if job["error_code"] == "media_expired":
-        raise ApiError(410, "media_expired", "the video is no longer available")
+        raise ApiError(410, "media_expired", MEDIA_GONE)
     if not job["output_url"]:
-        raise ApiError(409, "not_ready", "the video is not available yet")
-    url = job["output_url"]
-    for attempt in range(2):
-        try:
-            stream = await http_client.open_media(url, range_header=range_header)
-            break
-        except UpstreamError as exc:
-            if exc.status == 416:
-                raise ApiError(416, "invalid_input", "the requested byte range is not available") from exc
-            if exc.status not in GONE_STATUSES or attempt:
-                raise ApiError(502, "upstream_unavailable", "the video could not be fetched right now; try again") from exc
-        url = await _fresh_output_url(svc, job)
-    headers = dict(stream.headers)
-    headers["content-disposition"] = f'attachment; filename="{job["id"]}.mp4"'
-    return StreamingResponse(
-        stream.chunks,
-        status_code=stream.status,
-        media_type="video/mp4",
-        headers=headers,
-        background=BackgroundTask(stream.close),
-    )
+        raise ApiError(409, "not_ready", "the video link is not available yet")
+    job = await refresh_link(svc, job, strict=True)
+    return RedirectResponse(job["output_url"], status_code=302, headers={"cache-control": "no-store"})
 
 
-async def _fresh_output_url(svc: Any, job: dict[str, Any]) -> str:
+async def _renew_link(svc: Any, job: dict[str, Any]) -> str:
     try:
         account = svc.accounts.get(job["account_id"])
     except AccountError:
         account = None
     if account is None or not job["submit_id"]:
-        svc.db.update_job(job["id"], error_code="media_expired", error_message="the video is no longer available")
-        raise ApiError(410, "media_expired", "the video is no longer available")
+        svc.db.update_job(job["id"], error_code="media_expired", error_message=MEDIA_GONE)
+        raise ApiError(410, "media_expired", MEDIA_GONE)
     try:
         async with svc.accounts.client(account) as client:
             record = await client.history_record(job["submit_id"])
     except Exception as exc:
-        raise ApiError(502, "upstream_unavailable", "the video could not be fetched right now; try again") from exc
+        raise ApiError(502, "upstream_unavailable", "the video link could not be renewed right now; try again") from exc
     url = parse_history(record).video_url if record else None
     if not url:
-        svc.db.update_job(job["id"], error_code="media_expired", error_message="the video is no longer available")
-        raise ApiError(410, "media_expired", "the video is no longer available")
+        svc.db.update_job(job["id"], error_code="media_expired", error_message=MEDIA_GONE)
+        raise ApiError(410, "media_expired", MEDIA_GONE)
     svc.db.update_job(job["id"], output_url=url)
     return url
 
@@ -411,16 +425,17 @@ async def list_generations(request: Request, limit: int = 20, offset: int = 0, s
 
 @v1.get("/generations/{job_id}")
 async def get_generation(request: Request, job_id: str):
-    job = services(request).db.get_job(job_id)
+    svc = services(request)
+    job = svc.db.get_job(job_id)
     if job is None:
         raise ApiError(404, "not_found", "generation not found")
-    return public_job(job)
+    return public_job(await refresh_link(svc, job))
 
 
 @v1.get("/generations/{job_id}/content")
 async def get_generation_content(request: Request, job_id: str):
     svc = services(request)
-    return await media_response(svc, svc.db.get_job(job_id), request.headers.get("range"))
+    return await media_redirect(svc, svc.db.get_job(job_id))
 
 
 @v1.get("/credits")

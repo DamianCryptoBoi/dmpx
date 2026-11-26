@@ -1,4 +1,4 @@
-"""Signed read-only Dreamina HTTP calls (credits, history) and result streaming."""
+"""Signed read-only Dreamina HTTP calls (credits, history, prices) and result links."""
 
 from __future__ import annotations
 
@@ -7,12 +7,13 @@ import hashlib
 import json
 import os
 import random
+import re
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 
@@ -378,82 +379,25 @@ class DreaminaHTTP:
         return list(data.get("records_list") or [])
 
 
-# result streaming ------------------------------------------------------------------
-PASSTHROUGH_HEADERS = ("content-length", "content-range", "accept-ranges")
+# result links ---------------------------------------------------------------------
+def link_expiry(url: str | None) -> datetime | None:
+    """When a pre-signed result link stops working.
 
-
-@dataclass
-class MediaStream:
-    """An open upstream response; `chunks` yields the body, `close` releases it."""
-
-    status: int
-    headers: dict[str, str]
-    chunks: AsyncIterator[bytes]
-    close: Callable[[], Awaitable[None]]
-
-
-async def open_media(
-    url: str, *, user_agent: str = DEFAULT_UA, range_header: str | None = None, attempts: int = 4
-) -> MediaStream:
-    """Open a result file for streaming; nothing is written to disk.
-
-    CDN connects either finish in milliseconds or hang, so each attempt uses a
-    fresh connection with a short connect timeout, alternating to IPv4-only
-    after each connect failure. Retries happen only before the first byte.
-    The URL is pre-signed, so no cookies are sent.
+    The CDN puts the expiry in the path as hex Unix seconds
+    (https://v16-cc.capcut.com/<signature>/<expiry-hex>/video/...); links
+    last about six hours from when history returns them.
     """
-    # identity: the passed-through Content-Length must match the bytes we relay.
-    headers = {"user-agent": user_agent, "accept-encoding": "identity"}
-    if range_header:
-        headers["range"] = range_header
-    timeout = httpx.Timeout(connect=8.0, read=60.0, write=60.0, pool=10.0)
-    ipv4_only = False
-    last_error: Exception | None = None
-    for attempt in range(attempts):
-        transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0") if ipv4_only else None
-        client = httpx.AsyncClient(transport=transport, timeout=timeout, follow_redirects=True, headers=headers)
-        try:
-            response = await client.send(client.build_request("GET", url), stream=True)
-        except httpx.TransportError as exc:
-            await client.aclose()
-            if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
-                ipv4_only = not ipv4_only
-            last_error = exc
-        else:
-            if response.status_code < 400:
-                return _media_stream(client, response)
-            await response.aclose()
-            await client.aclose()
-            last_error = UpstreamError(
-                f"media HTTP {response.status_code}",
-                retryable=response.status_code >= 500,
-                status=response.status_code,
-            )
-            if not last_error.retryable:
-                raise last_error
-        if attempt < attempts - 1:
-            await asyncio.sleep(min(2 ** attempt, 8) * 0.5 + random.uniform(0, 0.5))
-    if isinstance(last_error, UpstreamError):
-        raise last_error
-    raise UpstreamTimeout(f"media fetch failed: {type(last_error).__name__}", retryable=True)
-
-
-def _media_stream(client: httpx.AsyncClient, response: httpx.Response) -> MediaStream:
-    closed = False
-
-    async def close() -> None:
-        nonlocal closed
-        if not closed:
-            closed = True
-            await response.aclose()
-            await client.aclose()
-
-    async def chunks() -> AsyncIterator[bytes]:
-        try:
-            async for chunk in response.aiter_bytes(64 * 1024):
-                yield chunk
-        finally:
-            await close()
-
-    headers = {name: response.headers[name] for name in PASSTHROUGH_HEADERS if name in response.headers}
-    return MediaStream(status=response.status_code, headers=headers, chunks=chunks(), close=close)
+    if not url:
+        return None
+    parts = urlsplit(url)
+    segments = [segment for segment in parts.path.split("/") if segment]
+    candidates = segments[1:2] if len(segments) > 1 else []
+    for raw in candidates:
+        if re.fullmatch(r"[0-9a-f]{8}", raw):
+            seconds = int(raw, 16)
+            if 1_600_000_000 < seconds < 4_102_444_800:  # 2020..2100
+                return datetime.fromtimestamp(seconds, timezone.utc)
+    for key, value in parse_qsl(parts.query):
+        if key.lower() in {"x-expires", "expires"} and value.isdigit():
+            return datetime.fromtimestamp(int(value), timezone.utc)
+    return None
