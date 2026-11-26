@@ -1,32 +1,44 @@
-<!doctype html>
+{% from "_macros.html" import icon, brand %}<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="same-origin">
+  <meta name="color-scheme" content="dark">
   <title>{% block title %}SDBF{% endblock %}</title>
+  <link rel="preload" href="/admin/static/fonts/bricolage-grotesque.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/admin/static/app.css">
   <script src="/admin/static/app.js" defer></script>
 </head>
 <body>
 {% block body %}
-<header class="topbar">
-  <a class="brand" href="/admin">SDBF</a>
-  <nav>
-    <a href="/admin" {% if nav == "overview" %}aria-current="page"{% endif %}>Overview</a>
-    <a href="/admin/accounts" {% if nav == "accounts" %}aria-current="page"{% endif %}>Accounts</a>
-    <a href="/admin/jobs" {% if nav in ("jobs", "job") %}aria-current="page"{% endif %}>Jobs</a>
-    <a href="/admin/models" {% if nav == "models" %}aria-current="page"{% endif %}>Models</a>
-  </nav>
-  <form method="post" action="/admin/logout" class="logout">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit" class="ghost">Log out</button>
-  </form>
-</header>
-<main>
-  {% if flash %}<div class="flash flash-{{ flash[0] }}" role="status">{{ flash[1] }}</div>{% endif %}
-  {% block content %}{% endblock %}
-</main>
+<div class="shell">
+  <aside class="sidebar">
+    {{ brand() }}
+    <nav class="nav" aria-label="Main">
+      <a class="nav-cta" href="/admin/create" {% if nav == "create" %}aria-current="page"{% endif %}>{{ icon("create") }} New generation</a>
+      <a href="/admin" {% if nav == "overview" %}aria-current="page"{% endif %}>{{ icon("overview") }} Overview</a>
+      <a href="/admin/jobs" {% if nav in ("jobs", "job") %}aria-current="page"{% endif %}>{{ icon("film") }} Generations</a>
+      <a href="/admin/accounts" {% if nav == "accounts" %}aria-current="page"{% endif %}>{{ icon("accounts") }} Accounts</a>
+      <a href="/admin/models" {% if nav == "models" %}aria-current="page"{% endif %}>{{ icon("models") }} Models</a>
+    </nav>
+    <div class="sidebar-foot">
+      <div class="meter">
+        <div class="meter-label">Credits available</div>
+        <div class="meter-value">{{ sidebar_credits | thousands }}</div>
+        <div class="live {{ 'on' if sidebar_active }}"><span class="dot"></span>{% if sidebar_active %}{{ sidebar_active }} in progress{% else %}idle{% endif %}</div>
+      </div>
+      <form method="post" action="/admin/logout" class="logout">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="quiet sm">{{ icon("logout", 16) }} Log out</button>
+      </form>
+    </div>
+  </aside>
+  <main class="main">
+    {% if flash %}<div class="flash flash-{{ flash[0] }}" role="status">{{ flash[1] }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
 {% endblock %}
 </body>
 </html>

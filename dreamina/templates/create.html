@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% from "_macros.html" import icon %}
+{% macro dropzone(name, input_id, label, kind, hint, multiple=false) -%}
+<label class="dropzone" data-dropzone>
+  <input type="file" name="{{ name }}" id="{{ input_id }}" accept="{{ 'audio/mpeg,audio/wav,.mp3,.wav' if kind == 'audio' else 'image/png,image/jpeg,image/webp' }}" {% if multiple %}multiple{% endif %}>
+  {{ icon(kind, 22) }}
+  <span><b>{{ label }}</b> · drop here or click to choose</span>
+  <span class="hint">{{ hint }}</span>
+  <span class="picked" data-picked></span>
+</label>
+{%- endmacro %}
+{% block title %}New generation · SDBF{% endblock %}
+{% set default_model = "seedance-2.5-flash" if models | selectattr("name", "equalto", "seedance-2.5-flash") | list else models[0].name %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <p class="eyebrow">Studio</p>
+    <h1>New generation</h1>
+    <p class="lede">Pick a model, describe the shot, and attach references. Credits are charged when it's submitted.</p>
+  </div>
+</header>
+
+<form id="mode-switch"></form>
+<form method="post" action="/admin/jobs" enctype="multipart/form-data" class="split" id="create-form" data-credits="{{ credits }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
+
+  <div class="grid">
+    <section class="card rise">
+      <div class="segmented mode-switch" role="radiogroup" aria-label="Mode">
+        <label><input type="radio" form="mode-switch" name="mode" value="unified" checked><span>References</span></label>
+        <label><input type="radio" form="mode-switch" name="mode" value="first_last"><span>First &amp; last frame</span></label>
+      </div>
+      <h3 class="card-title">Model</h3>
+      <div class="models">
+        {% for model in models %}
+        <label class="model-option">
+          <input type="radio" name="model" value="{{ model.name }}" {% if model.name == default_model %}checked{% endif %} required>
+          <span class="body">
+            <span class="name">{{ model.name | model_label }}</span>
+            <span class="price">from {{ model.pricing_credits_per_second.values() | min }} credits/s</span>
+            <span class="limits">{{ model.resolutions | first }}–{{ model.resolutions | last }} · {{ model.duration_seconds.min }}–{{ model.duration_seconds.max }} s · {{ model.reference_limits.images }} img · {{ model.reference_limits.audio }} audio</span>
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="card form-grid rise" style="--i: 1">
+      <div class="field-block span-all">
+        <span class="k">Duration <span class="hint" id="duration-range"></span></span>
+        <div class="range-row">
+          <input type="range" name="duration_seconds" id="duration" min="4" max="15" step="1" value="4" aria-label="Duration in seconds">
+          <output for="duration" id="duration-out">4 s</output>
+        </div>
+      </div>
+      <div class="field-block span-all">
+        <span class="k">Resolution</span>
+        <div class="segmented" role="radiogroup" aria-label="Resolution">
+          {% for res in resolutions %}
+          <label><input type="radio" name="resolution" value="{{ res }}" {% if res == "720p" %}checked{% endif %}><span>{{ res }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="field-block span-all" data-mode="unified">
+        <span class="k">Aspect ratio</span>
+        <div class="segmented" role="radiogroup" aria-label="Aspect ratio">
+          {% for ratio in aspect_ratios %}
+          <label><input type="radio" name="aspect_ratio" value="{{ ratio }}" {% if ratio == "16:9" %}checked{% endif %}><span>{{ ratio }}</span></label>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="field-block span-all" data-mode="first_last" hidden>
+        <span class="k">Aspect ratio</span>
+        <p class="hint" style="margin: 0.4rem 0 0">Follows the first frame.</p>
+      </div>
+    </section>
+
+    <section class="card rise" style="--i: 2">
+      <label for="prompt">Prompt <span class="hint" data-mode="unified">Tag uploads with @image1, @audio1… Untagged ones are added at the start.</span></label>
+      <textarea id="prompt" name="prompt" rows="6" required maxlength="15000" placeholder="A slow dolly shot across a rain-soaked neon street…" style="margin-top: 0.5rem"></textarea>
+      <div class="tokens" id="tokens" data-mode="unified" style="margin-top: 0.6rem"></div>
+    </section>
+
+    <section class="card rise" style="--i: 3" data-mode="unified">
+      <h3 class="card-title">References <span class="hint" id="ref-limits"></span></h3>
+      <div class="frames">
+        <div class="grid">
+          {{ dropzone("images", "images", "Images", "image", "PNG, JPEG or WebP", multiple=true) }}
+          <div class="previews" id="image-previews"></div>
+        </div>
+        <div class="grid">
+          {{ dropzone("audio", "audio", "Audio", "audio", "MP3 or WAV", multiple=true) }}
+          <div class="previews" id="audio-previews"></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="card rise" style="--i: 3" data-mode="first_last" hidden>
+      <h3 class="card-title">Frames</h3>
+      <div class="frames">
+        <div class="grid">
+          {{ dropzone("first_frame", "first-frame", "First frame", "image", "required") }}
+          <div class="previews" id="first-preview"></div>
+        </div>
+        <div class="grid">
+          {{ dropzone("last_frame", "last-frame", "Last frame", "image", "optional") }}
+          <div class="previews" id="last-preview"></div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <aside class="summary">
+    <section class="card rise" style="--i: 1">
+      <h3 class="card-title">Estimated cost</h3>
+      <div class="cost">
+        <span class="value"><span id="cost">—</span> <small>credits</small></span>
+        <span class="formula" id="formula">&nbsp;</span>
+      </div>
+      <div style="margin-top: 1rem">
+        <div class="balance-line"><span>Available</span><b>{{ credits | thousands }}</b></div>
+        <div class="balance-line" id="after-line"><span>After this</span><b id="after">—</b></div>
+        <div class="balance-line"><span>Ready accounts</span><b>{{ ready }}</b></div>
+      </div>
+      <button type="submit" class="submit-btn" style="margin-top: 0.8rem">{{ icon("play", 16) }} Generate</button>
+      <p class="hint" style="margin: 0.7rem 0 0">The final cost shows in Generations once it's charged.</p>
+    </section>
+  </aside>
+</form>
+<script type="application/json" id="catalog">{{ catalog_json | safe }}</script>
+{% endblock %}

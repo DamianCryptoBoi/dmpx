@@ -1,55 +1,64 @@
 {% extends "base.html" %}
-{% from "_macros.html" import job_table %}
-{% block title %}Jobs · SDBF{% endblock %}
+{% from "_macros.html" import icon, gen_row %}
+{% block title %}Generations · SDBF{% endblock %}
+{% macro qs(extra) -%}
+{%- set merged = dict(query, **extra) -%}
+{%- set parts = [] -%}
+{%- for key, value in merged.items() if value -%}{%- set _ = parts.append(key ~ "=" ~ (value | urlencode)) -%}{%- endfor -%}
+{{ ("?" ~ parts | join("&")) if parts else "" }}
+{%- endmacro %}
 {% block content %}
-<h1>Jobs</h1>
-<details class="card" {% if not jobs %}open{% endif %}>
-  <summary><strong>New generation</strong> <span class="muted">— spends credits on the selected model</span></summary>
-  <form method="post" action="/admin/jobs" enctype="multipart/form-data" class="grid-form">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <input type="hidden" name="idempotency_key" value="{{ idempotency_key }}">
-    <label>Model
-      <select name="model" required>
-        {% for model in models %}<option value="{{ model.name }}">{{ model.name }}</option>{% endfor %}
-      </select>
-    </label>
-    <label>Duration (s) <input type="number" name="duration_seconds" min="4" max="30" value="4" required></label>
-    <label>Resolution
-      <select name="resolution">{% for r in resolutions %}<option {% if r == "720p" %}selected{% endif %}>{{ r }}</option>{% endfor %}</select>
-    </label>
-    <label>Aspect ratio
-      <select name="aspect_ratio">{% for a in aspect_ratios %}<option {% if a == "16:9" %}selected{% endif %}>{{ a }}</option>{% endfor %}</select>
-    </label>
-    <label class="span-all"><span>Prompt <span class="muted">— reference uploads with @image1, @audio1, …</span></span>
-      <textarea name="prompt" rows="4" required maxlength="15000"></textarea>
-    </label>
-    <fieldset class="span-all">
-      <legend>Unified references</legend>
-      <label>Images <input type="file" name="images" accept="image/png,image/jpeg,image/webp" multiple></label>
-      <label>Audio <input type="file" name="audio" accept="audio/mpeg,audio/wav" multiple></label>
-    </fieldset>
-    <fieldset class="span-all">
-      <legend>Or first / last frame <span class="muted">(uses adaptive aspect ratio)</span></legend>
-      <label>First frame <input type="file" name="first_frame" accept="image/png,image/jpeg,image/webp"></label>
-      <label>Last frame <input type="file" name="last_frame" accept="image/png,image/jpeg,image/webp"></label>
-    </fieldset>
-    <button type="submit">Queue generation</button>
-  </form>
-</details>
+<header class="page-head">
+  <div>
+    <p class="eyebrow">History</p>
+    <h1>Generations</h1>
+    <p class="lede">Every result with its link, cost, and the account that made it.</p>
+  </div>
+  <a class="button" href="/admin/create">{{ icon("create", 16) }} New generation</a>
+</header>
 
-<nav class="filters">
-  {% for value, label in [(none, "All"), ("queued", "Queued"), ("running", "Running"), ("succeeded", "Succeeded"), ("failed", "Failed")] %}
-  <a href="/admin/jobs{% if value %}?status={{ value }}{% endif %}" {% if status == value %}aria-current="page"{% endif %}>{{ label }}</a>
-  {% endfor %}
-</nav>
-<div {% if jobs | selectattr("status", "in", ["queued", "submitting", "running"]) | list %}data-refresh-seconds="10"{% endif %}>
-{{ job_table(jobs) }}
+<div class="toolbar">
+  <nav class="chips" aria-label="Status">
+    {% for value, label in [(none, "All"), ("queued", "Queued"), ("running", "Rendering"), ("succeeded", "Succeeded"), ("failed", "Failed")] %}
+    <a class="chip" href="/admin/jobs{{ qs({'status': value, 'page': none}) }}" {% if status == value %}aria-current="page"{% endif %}>{{ label }}</a>
+    {% endfor %}
+  </nav>
+  <form method="get" action="/admin/jobs" data-autosubmit>
+    {% if status %}<input type="hidden" name="status" value="{{ status }}">{% endif %}
+    <select name="account" aria-label="Account">
+      <option value="">All accounts</option>
+      {% for item in accounts %}<option value="{{ item.id }}" {% if account == item.id %}selected{% endif %}>{{ item.label }}</option>{% endfor %}
+    </select>
+    <select name="model" aria-label="Model">
+      <option value="">All models</option>
+      {% for name in models %}<option value="{{ name }}" {% if model == name %}selected{% endif %}>{{ name | model_label }}</option>{% endfor %}
+    </select>
+    <noscript><button type="submit" class="ghost sm">Apply</button></noscript>
+  </form>
 </div>
+
+<p class="summary-line" style="margin: 0 0 1rem">
+  <span><b>{{ total | thousands }}</b> generation{{ "" if total == 1 else "s" }}</span>
+  <span><b class="amber">{{ credits_total | thousands }}</b> credits charged</span>
+  {% if query %}<a href="/admin/jobs">Clear filters</a>{% endif %}
+</p>
+
+<div class="gens" {% if jobs | selectattr("status", "in", ["queued", "submitting", "running"]) | list or jobs | selectattr("media", "equalto", "pending") | list %}data-refresh-seconds="10"{% endif %}>
+  {% for job in jobs %}
+    {{ gen_row(job, labels, loop.index0) }}
+  {% else %}
+    <div class="empty-state">
+      <p>{% if query %}Nothing matches these filters.{% else %}No generations yet.{% endif %}</p>
+      <a class="button" href="/admin/create">New generation</a>
+    </div>
+  {% endfor %}
+</div>
+
 {% if pages > 1 %}
 <nav class="pager">
-  {% if page > 1 %}<a href="?page={{ page - 1 }}{% if status %}&status={{ status }}{% endif %}">← Newer</a>{% endif %}
-  <span class="muted">Page {{ page }} of {{ pages }}</span>
-  {% if page < pages %}<a href="?page={{ page + 1 }}{% if status %}&status={{ status }}{% endif %}">Older →</a>{% endif %}
+  {% if page > 1 %}<a class="button ghost sm" href="/admin/jobs{{ qs({'page': page - 1}) }}">← Newer</a>{% endif %}
+  <span class="muted mono">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a class="button ghost sm" href="/admin/jobs{{ qs({'page': page + 1}) }}">Older →</a>{% endif %}
 </nav>
 {% endif %}
 {% endblock %}

@@ -1,26 +1,94 @@
-{% macro badge(value) -%}
-<span class="badge badge-{{ value }}">{{ value | replace("_", " ") }}</span>
+{% macro icon(name, size=18) -%}
+<svg width="{{ size }}" height="{{ size }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+{%- if name == "overview" -%}<rect x="3" y="3" width="7.5" height="9" rx="1.8"/><rect x="13.5" y="3" width="7.5" height="5" rx="1.8"/><rect x="13.5" y="11" width="7.5" height="10" rx="1.8"/><rect x="3" y="15" width="7.5" height="6" rx="1.8"/>
+{%- elif name == "create" -%}<path d="M12 4.5v15M4.5 12h15"/>
+{%- elif name == "film" -%}<rect x="3" y="4" width="18" height="16" rx="2.2"/><path d="M7.5 4v16M16.5 4v16M3 9h4.5M3 15h4.5M16.5 9H21M16.5 15H21"/>
+{%- elif name == "accounts" -%}<circle cx="9" cy="8" r="3.4"/><path d="M2.8 20c.8-3.4 3.3-5.4 6.2-5.4s5.4 2 6.2 5.4"/><path d="M15.5 4.7a3.4 3.4 0 0 1 0 6.6M18.2 14.9c1.6.8 2.6 2.5 3 5.1"/>
+{%- elif name == "models" -%}<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>
+{%- elif name == "play" -%}<path d="M8.5 5.8v12.4L18.6 12z" fill="currentColor" stroke="none"/>
+{%- elif name == "external" -%}<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>
+{%- elif name == "link" -%}<rect x="9" y="9" width="11" height="11" rx="2.2"/><path d="M5.5 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v.5"/>
+{%- elif name == "download" -%}<path d="M12 4v11M7 10.5l5 4.5 5-4.5M5 20h14"/>
+{%- elif name == "logout" -%}<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 16l4-4-4-4M14 12H4"/>
+{%- elif name == "alert" -%}<circle cx="12" cy="12" r="8.5"/><path d="M12 8v4.5M12 15.8v.2"/>
+{%- elif name == "image" -%}<rect x="3" y="4" width="18" height="16" rx="2.2"/><circle cx="9" cy="10" r="1.8"/><path d="M21 16l-5.5-5.5L6 20"/>
+{%- elif name == "audio" -%}<path d="M9 18V6l11-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="17.5" cy="16" r="2.5"/>
+{%- elif name == "arrow-left" -%}<path d="M19 12H5M11 6l-6 6 6 6"/>
+{%- endif -%}
+</svg>
 {%- endmacro %}
 
-{% macro job_table(jobs) -%}
-<div class="table-wrap">
-<table>
-  <thead><tr><th>Job</th><th>Status</th><th>Model</th><th>Settings</th><th>Account</th><th class="num">Credits</th><th>Created</th></tr></thead>
-  <tbody>
-  {% for job in jobs %}
-    <tr>
-      <td><a href="/admin/jobs/{{ job.id }}"><code>{{ job.id[:10] }}</code></a></td>
-      <td>{{ badge(job.status) }}</td>
-      <td>{{ job.model }}</td>
-      <td class="muted">{{ job.duration_seconds }}s · {{ job.resolution }} · {{ job.aspect_ratio }}</td>
-      <td>{{ job.account_id or "—" }}</td>
-      <td class="num">{{ job.credits_used if job.credits_used is not none else "~" ~ (job.credits_estimate or "?") }}</td>
-      <td class="muted"><time datetime="{{ job.created_at }}">{{ job.created_at }}</time></td>
-    </tr>
-  {% else %}
-    <tr><td colspan="7" class="empty">No jobs yet.</td></tr>
-  {% endfor %}
-  </tbody>
-</table>
-</div>
+{% macro brand() -%}
+<a class="brand" href="/admin">
+  <span class="brand-mark"><svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.8v14.4L19.4 12z" fill="currentColor"/></svg></span>
+  <span><span class="brand-name">SDBF</span><span class="brand-sub">Generation console</span></span>
+</a>
+{%- endmacro %}
+
+{% macro badge(value) -%}
+<span class="badge badge-{{ value }}"><span class="dot"></span>{{ value | replace("_", " ") }}</span>
+{%- endmacro %}
+
+{% macro when(iso) -%}
+{% if iso %}<time datetime="{{ iso }}" data-relative>{{ iso }}</time>{% else %}—{% endif %}
+{%- endmacro %}
+
+{% macro tile(job, extra="") -%}
+{% if job.media == "ready" %}
+<button type="button" class="tile {{ extra }}" data-video="{{ job.content_url }}" aria-label="Play video {{ job.id[:8] }}">
+  <span class="play">{{ icon("play", 20) }}</span>
+  <span class="ratio">{{ "frames" if job.mode == "first_last" else job.aspect_ratio }}</span>
+</button>
+{% elif job.status in ("running", "submitting") %}
+<div class="tile tile-running {{ extra }}"><span class="tile-state"><span class="dot"></span>Rendering</span></div>
+{% elif job.status == "queued" %}
+<div class="tile tile-queued {{ extra }}"><span class="tile-state">Queued</span></div>
+{% elif job.status == "failed" %}
+<div class="tile tile-failed {{ extra }}"><span class="tile-state">{{ icon("alert", 20) }}Failed</span></div>
+{% elif job.media == "expired" %}
+<div class="tile {{ extra }}"><span class="tile-state">Expired</span></div>
+{% else %}
+<div class="tile {{ extra }}"><span class="tile-state">Fetching link</span></div>
+{% endif %}
+{%- endmacro %}
+
+{% macro credits_cell(job) -%}
+{% if job.credits_used is not none %}<span class="credits">{{ job.credits_used | thousands }}</span>
+{% else %}<span class="credits est" title="Estimate">~{{ job.credits_estimate | thousands }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro result_actions(job, small=true) -%}
+{% if job.media == "ready" %}
+<a class="button ghost {{ 'sm icon-btn' if small }}" href="{{ job.content_url }}" target="_blank" rel="noopener" title="Open video in a new tab">{{ icon("external", 16) }}{% if not small %} Open{% endif %}</a>
+<button type="button" class="ghost {{ 'sm icon-btn' if small }}" data-copy="{{ job.content_url }}" title="Copy video link">{{ icon("link", 16) }}{% if not small %} Copy link{% endif %}</button>
+<a class="button ghost {{ 'sm icon-btn' if small }}" href="{{ job.content_url }}" download="{{ job.id }}.mp4" title="Download MP4">{{ icon("download", 16) }}{% if not small %} Download{% endif %}</a>
+{% endif %}
+{%- endmacro %}
+
+{% macro gen_row(job, labels, index=0) -%}
+<article class="gen rise" style="--i: {{ index }}">
+  {{ tile(job) }}
+  <div class="gen-main">
+    <p class="gen-prompt"><a href="/admin/jobs/{{ job.id }}">{{ job.prompt }}</a></p>
+    <div class="gen-meta">
+      {{ badge(job.status) }}
+      <span>{{ job.model | model_label }}</span>
+      <span class="sep">{{ job.duration_seconds }}s · {{ job.resolution }} · {{ "frames" if job.mode == "first_last" else job.aspect_ratio }}</span>
+      <span class="sep">{{ when(job.created_at) }}</span>
+    </div>
+    {% if job.error %}<div class="gen-meta"><code style="color: var(--red)">{{ job.error.code }}</code><span>{{ job.error.message | truncate(140) }}</span></div>{% endif %}
+  </div>
+  <div class="gen-col acct">
+    <span class="k">Account</span>
+    {% if job.account_id %}
+      <a class="v" href="/admin/jobs?account={{ job.account_id }}">{{ labels.get(job.account_id, job.account_id) }}</a>
+      <span class="v mono faint">{{ job.account_id }}</span>
+    {% else %}<span class="v faint">not assigned</span>{% endif %}
+  </div>
+  <div class="gen-col"><span class="k">Credits</span>{{ credits_cell(job) }}</div>
+  <div class="gen-actions">
+    {{ result_actions(job) }}
+    <a class="button quiet sm" href="/admin/jobs/{{ job.id }}">Details</a>
+  </div>
+</article>
 {%- endmacro %}

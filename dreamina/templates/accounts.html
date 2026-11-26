@@ -1,64 +1,85 @@
 {% extends "base.html" %}
-{% from "_macros.html" import badge %}
+{% from "_macros.html" import icon, badge, when %}
 {% block title %}Accounts · SDBF{% endblock %}
 {% block content %}
-<h1>Accounts</h1>
-<div class="table-wrap" {% if accounts | selectattr("logging_in") | list %}data-refresh-seconds="5"{% endif %}>
-<table>
-  <thead><tr><th>Account</th><th>State</th><th class="num">Credits</th><th>Last used</th><th>Actions</th></tr></thead>
-  <tbody>
+<header class="page-head">
+  <div>
+    <p class="eyebrow">Fleet</p>
+    <h1>Accounts</h1>
+    <p class="lede">{{ accounts | length }} account{{ "" if accounts | length == 1 else "s" }} · <span class="mono amber">{{ accounts | map(attribute="credits") | select | sum | thousands }}</span> credits on hand.</p>
+  </div>
+  <a class="button ghost" href="#add">{{ icon("create", 16) }} Add account</a>
+</header>
+
+<div class="accounts" {% if accounts | selectattr("logging_in") | list %}data-refresh-seconds="5"{% endif %}>
   {% for account in accounts %}
-  <tr>
-    <td>
-      <strong>{{ account.label }}</strong> <code class="muted">{{ account.id }}</code><br>
-      <span class="muted">{{ account.email }}</span>
-      {% if not account.has_password %}<br><span class="warn-text">Password missing from .env</span>{% endif %}
-      {% if account.last_error %}<br><span class="error-text">{{ account.last_error }}</span>{% endif %}
-    </td>
-    <td>{{ badge("logging_in" if account.logging_in else account.state) }}{% if account.busy %} {{ badge("busy") }}{% endif %}</td>
-    <td class="num">{{ account.credits if account.credits is not none else "—" }}<br>{% if account.credits_updated_at %}<small class="muted"><time datetime="{{ account.credits_updated_at }}">{{ account.credits_updated_at }}</time></small>{% endif %}</td>
-    <td class="muted">{% if account.last_used_at %}<time datetime="{{ account.last_used_at }}">{{ account.last_used_at }}</time>{% else %}never{% endif %}</td>
-    <td class="actions">
+  <section class="card account rise" style="--i: {{ loop.index0 }}">
+    <div class="account-head">
+      <div style="min-width: 0">
+        <div class="account-name">{{ account.label }}</div>
+        <div class="account-id">{{ account.id }} · {{ account.email }}</div>
+      </div>
+      <div class="btn-row" style="justify-content: flex-end">
+        {{ badge("logging_in" if account.logging_in else account.state) }}{% if account.busy %}{{ badge("busy") }}{% endif %}
+      </div>
+    </div>
+    <div>
+      <div class="account-balance"><span class="value">{{ account.credits | thousands }}</span><span class="muted">credits</span></div>
+      <small class="faint">updated {{ when(account.credits_updated_at) }}</small>
+    </div>
+    <div class="usage">
+      <div><b>{{ account.usage.jobs }}</b><span>Generations</span></div>
+      <div><b class="amber">{{ account.usage.credits_used | thousands }}</b><span>Spent</span></div>
+      <div><b>{{ account.usage.failed }}</b><span>Failed</span></div>
+    </div>
+    <div class="gen-meta">
+      <span>Last used {{ when(account.last_used_at) if account.last_used_at else "never" }}</span>
+      <span class="sep">Signed in {{ when(account.last_login_at) if account.last_login_at else "never" }}</span>
+    </div>
+    {% if not account.has_password %}<p class="warn">Password missing from .env</p>{% endif %}
+    {% if account.last_error %}<p class="error">{{ account.last_error }}</p>{% endif %}
+    <div class="btn-row">
       {% for action, label in [("refresh", "Refresh credits"), ("login", "Log in again"), ("toggle", "Disable" if account.enabled else "Enable")] %}
       <form method="post" action="/admin/accounts/{{ account.id }}/{{ action }}">
         <input type="hidden" name="csrf" value="{{ csrf }}">
-        <button type="submit" class="small">{{ label }}</button>
+        <button type="submit" class="ghost sm">{{ label }}</button>
       </form>
       {% endfor %}
-      <details>
-        <summary>Edit</summary>
-        <form method="post" action="/admin/accounts/{{ account.id }}/update" class="stack compact">
+      <a class="button quiet sm" href="/admin/jobs?account={{ account.id }}">History →</a>
+    </div>
+    <details class="drawer">
+      <summary>Edit or remove</summary>
+      <div>
+        <form method="post" action="/admin/accounts/{{ account.id }}/update" class="form-grid">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <label>Label <input name="label" value="{{ account.label }}" maxlength="64"></label>
           <label>Email <input type="email" name="email" value="{{ account.email }}"></label>
-          <label>New password <input type="password" name="password" autocomplete="new-password" placeholder="unchanged"></label>
-          <button type="submit" class="small">Save</button>
+          <label class="span-all">New password <input type="password" name="password" autocomplete="new-password" placeholder="leave empty to keep the current one"></label>
+          <div><button type="submit" class="ghost sm">Save changes</button></div>
         </form>
-        <form method="post" action="/admin/accounts/{{ account.id }}/remove" class="stack compact danger-zone">
+        <form method="post" action="/admin/accounts/{{ account.id }}/remove" class="form-grid danger-zone">
           <input type="hidden" name="csrf" value="{{ csrf }}">
-          <label>Type <code>{{ account.id }}</code> to remove
+          <label class="span-all">Type <code>{{ account.id }}</code> to remove this account
             <input name="confirm" autocomplete="off" required pattern="{{ account.id }}">
           </label>
-          <button type="submit" class="small danger">Remove account</button>
+          <div><button type="submit" class="danger sm">Remove account</button></div>
         </form>
-      </details>
-    </td>
-  </tr>
-  {% else %}
-  <tr><td colspan="5" class="empty">No accounts. Add one below.</td></tr>
+      </div>
+    </details>
+  </section>
   {% endfor %}
-  </tbody>
-</table>
-</div>
 
-<h2>Add account</h2>
-<form method="post" action="/admin/accounts" class="card grid-form">
-  <input type="hidden" name="csrf" value="{{ csrf }}">
-  <label>Account id <input name="account_id" required pattern="[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?" placeholder="main-2" autocomplete="off"></label>
-  <label>Label <input name="label" maxlength="64" placeholder="Main account 2"></label>
-  <label>Email <input type="email" name="email" required autocomplete="off"></label>
-  <label>Password <input type="password" name="password" required autocomplete="new-password"></label>
-  <p class="muted span-all">Credentials are written to <code>.env</code> (mode 0600) and never stored in the database. A login starts right after saving.</p>
-  <button type="submit">Add and log in</button>
-</form>
+  <section class="card add-card rise" id="add" style="--i: {{ accounts | length }}">
+    <h3 class="card-title">Add account</h3>
+    <form method="post" action="/admin/accounts" class="form-grid">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <label>Account id <input name="account_id" required pattern="[a-z0-9](?:[a-z0-9\-]{0,30}[a-z0-9])?" placeholder="main-2" autocomplete="off"></label>
+      <label>Label <input name="label" maxlength="64" placeholder="Main account 2"></label>
+      <label class="span-all">Email <input type="email" name="email" required autocomplete="off"></label>
+      <label class="span-all">Password <input type="password" name="password" required autocomplete="new-password"></label>
+      <p class="hint span-all" style="margin: 0">Stored only in the server's <code>.env</code> (owner-only), never in the database. Sign-in starts right after saving.</p>
+      <div><button type="submit">Add and sign in</button></div>
+    </form>
+  </section>
+</div>
 {% endblock %}

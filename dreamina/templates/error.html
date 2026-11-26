@@ -1,11 +1,13 @@
 {% extends "base.html" %}
+{% from "_macros.html" import brand %}
 {% block title %}Error · SDBF{% endblock %}
 {% block body %}
-<main class="login">
-  <div class="card stack">
+<main class="gate">
+  <div class="card gate-card rise">
+    {{ brand() }}
     <h1>Something went wrong</h1>
-    <p><code>{{ code }}</code> {{ message }}</p>
-    <p><a href="/admin">Back to the dashboard</a></p>
+    <p class="flash flash-error" style="margin: 0"><code>{{ code }}</code><span>{{ message }}</span></p>
+    <a class="button ghost" href="/admin">Back to the console</a>
   </div>
 </main>
 {% endblock %}

@@ -216,27 +216,63 @@ class Database:
             row = self._conn.execute("SELECT * FROM jobs WHERE idempotency_key = ?", (key,)).fetchone()
         return self._decode_job(row)
 
-    def list_jobs(self, limit: int = 50, offset: int = 0, status: str | None = None) -> list[dict[str, Any]]:
-        query = "SELECT * FROM jobs"
-        params: list[Any] = []
-        if status:
-            query += " WHERE status = ?"
-            params.append(status)
-        query += " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
-        params.extend([limit, offset])
+    @staticmethod
+    def _job_filter(status: str | None, account_id: str | None, model: str | None) -> tuple[str, list[Any]]:
+        clauses, params = [], []
+        for column, value in (("status", status), ("account_id", account_id), ("model", model)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
+
+    def list_jobs(
+        self,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        account_id: str | None = None,
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        where, params = self._job_filter(status, account_id, model)
+        query = f"SELECT * FROM jobs{where} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?"
         with self._lock:
-            rows = self._conn.execute(query, params).fetchall()
+            rows = self._conn.execute(query, [*params, limit, offset]).fetchall()
         return [self._decode_job(row) for row in rows]
 
-    def count_jobs(self, status: str | None = None) -> int:
-        query = "SELECT COUNT(*) AS count FROM jobs"
-        params: list[Any] = []
-        if status:
-            query += " WHERE status = ?"
-            params.append(status)
+    def count_jobs(self, status: str | None = None, account_id: str | None = None, model: str | None = None) -> int:
+        where, params = self._job_filter(status, account_id, model)
         with self._lock:
-            row = self._conn.execute(query, params).fetchone()
+            row = self._conn.execute(f"SELECT COUNT(*) AS count FROM jobs{where}", params).fetchone()
         return int(row["count"])
+
+    def credits_used(
+        self,
+        status: str | None = None,
+        account_id: str | None = None,
+        model: str | None = None,
+        since: str | None = None,
+    ) -> int:
+        """Credits charged by matching jobs, optionally finished at or after `since`."""
+        where, params = self._job_filter(status, account_id, model)
+        if since:
+            where += (" AND" if where else " WHERE") + " finished_at >= ?"
+            params.append(since)
+        with self._lock:
+            row = self._conn.execute(f"SELECT COALESCE(SUM(credits_used), 0) AS total FROM jobs{where}", params).fetchone()
+        return int(row["total"])
+
+    def account_usage(self) -> dict[str, dict[str, int]]:
+        """Per account: generations, how they ended, and credits charged."""
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT account_id,
+                          COUNT(*) AS jobs,
+                          SUM(status = 'succeeded') AS succeeded,
+                          SUM(status = 'failed') AS failed,
+                          COALESCE(SUM(credits_used), 0) AS credits_used
+                   FROM jobs WHERE account_id IS NOT NULL GROUP BY account_id"""
+            ).fetchall()
+        return {row["account_id"]: {key: int(row[key] or 0) for key in ("jobs", "succeeded", "failed", "credits_used")} for row in rows}
 
     def jobs_with_status(self, statuses: list[str]) -> list[dict[str, Any]]:
         placeholders = ", ".join("?" for _ in statuses)

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,20 @@ from .security import csrf_matches, verify_password
 COOKIE = "dreamina_admin"
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 router = APIRouter(prefix="/admin")
+JOB_STATUSES = ("queued", "submitting", "running", "succeeded", "failed")
+
+
+def model_label(name: str) -> str:
+    """seedance-2.5-flash -> Seedance 2.5 Flash"""
+    return " ".join(part.capitalize() if not part[:1].isdigit() else part for part in name.split("-"))
+
+
+def thousands(value: Any) -> str:
+    return f"{value:,}" if isinstance(value, int) else ("—" if value is None else str(value))
+
+
+templates.env.filters["model_label"] = model_label
+templates.env.filters["thousands"] = thousands
 
 
 class LoginRequired(Exception):
@@ -84,10 +100,27 @@ def render(request: Request, name: str, payload: dict[str, Any], **context: Any)
         {
             "csrf": payload["csrf"],
             "flash": svc.flashes.pop(payload["csrf"], None),
-            "nav": name.split(".")[0],
+            "nav": context.pop("nav", name.split(".")[0]),
+            "sidebar_credits": credit_summary(svc)["total_available"],
+            "sidebar_active": sum(svc.db.counts_by_status().get(state, 0) for state in ("queued", "submitting", "running")),
             **context,
         },
     )
+
+
+def account_rows(svc: Any) -> list[dict[str, Any]]:
+    """Accounts with what each has generated and spent through SDBF."""
+    usage = svc.db.account_usage()
+    empty = {"jobs": 0, "succeeded": 0, "failed": 0, "credits_used": 0}
+    return [{**account, "usage": usage.get(account["id"], empty)} for account in svc.accounts.list()]
+
+
+def labels(svc: Any) -> dict[str, str]:
+    return {account["id"]: account["label"] for account in svc.accounts.list()}
+
+
+def iso_ago(**delta: float) -> str:
+    return (datetime.now(timezone.utc) - timedelta(**delta)).isoformat(timespec="seconds")
 
 
 # authentication ---------------------------------------------------------------
@@ -156,6 +189,9 @@ def overview_data(svc: Any) -> dict[str, Any]:
         "queued": counts.get("queued", 0),
         "succeeded": counts.get("succeeded", 0),
         "failed": counts.get("failed", 0),
+        "spent_day": svc.db.credits_used(since=iso_ago(hours=24)),
+        "spent_week": svc.db.credits_used(since=iso_ago(days=7)),
+        "spent_total": svc.db.credits_used(),
     }
 
 
@@ -168,8 +204,10 @@ async def overview(request: Request):
         "overview.html",
         payload,
         stats=overview_data(svc),
-        failures=[public_job(job, internal=True) for job in svc.db.recent_failures(5)],
-        recent=[public_job(job, internal=True) for job in svc.db.list_jobs(limit=8)],
+        failures=[public_job(job, base="/admin/jobs", internal=True) for job in svc.db.recent_failures(5)],
+        recent=[public_job(job, base="/admin/jobs", internal=True) for job in svc.db.list_jobs(limit=6)],
+        accounts=account_rows(svc),
+        labels=labels(svc),
         warnings=svc.settings.warnings,
     )
 
@@ -186,7 +224,7 @@ async def status_json(request: Request):
 @router.get("/accounts", response_class=HTMLResponse)
 async def accounts_page(request: Request):
     payload = session(request)
-    return render(request, "accounts.html", payload, accounts=services(request).accounts.list())
+    return render(request, "accounts.html", payload, accounts=account_rows(services(request)))
 
 
 @router.post("/accounts")
@@ -253,17 +291,22 @@ async def account_action(request: Request, account_id: str, action: str):
 
 
 @router.get("/jobs", response_class=HTMLResponse)
-async def jobs_page(request: Request, page: int = 1, status: str | None = None):
+async def jobs_page(
+    request: Request, page: int = 1, status: str | None = None, account: str | None = None, model: str | None = None
+):
     payload = session(request)
     svc = services(request)
     page = max(1, page)
     per_page = 25
-    status = status if status in {"queued", "submitting", "running", "succeeded", "failed"} else None
-    total = svc.db.count_jobs(status)
+    status = status if status in JOB_STATUSES else None
+    account = account or None
+    model = model if model in MODELS else None
+    total = svc.db.count_jobs(status, account, model)
     jobs = [
         public_job(job, base="/admin/jobs", internal=True)
-        for job in svc.db.list_jobs(limit=per_page, offset=(page - 1) * per_page, status=status)
+        for job in svc.db.list_jobs(limit=per_page, offset=(page - 1) * per_page, status=status, account_id=account, model=model)
     ]
+    query = {key: value for key, value in (("status", status), ("account", account), ("model", model)) if value}
     return render(
         request,
         "jobs.html",
@@ -271,11 +314,36 @@ async def jobs_page(request: Request, page: int = 1, status: str | None = None):
         jobs=jobs,
         page=page,
         pages=max(1, (total + per_page - 1) // per_page),
+        total=total,
+        credits_total=svc.db.credits_used(status, account, model),
         status=status,
-        models=list(MODELS.values()),
-        aspect_ratios=ASPECT_RATIOS,
+        account=account,
+        model=model,
+        query=query,
+        accounts=svc.accounts.list(),
+        labels=labels(svc),
+        models=list(MODELS),
+    )
+
+
+@router.get("/create", response_class=HTMLResponse)
+async def create_page(request: Request):
+    payload = session(request)
+    svc = services(request)
+    catalog = public_catalog()
+    return render(
+        request,
+        "create.html",
+        payload,
+        nav="create",
+        models=catalog,
+        # Embedded in a <script> block: keep "</" from closing it early.
+        catalog_json=json.dumps({model["name"]: model for model in catalog}).replace("</", "<\\/"),
         resolutions=sorted({r for model in MODELS.values() for r in model.resolutions}, key=_resolution_order),
+        aspect_ratios=ASPECT_RATIOS,
         idempotency_key=uuid.uuid4().hex,
+        credits=credit_summary(svc)["total_available"],
+        ready=sum(1 for account in svc.accounts.list() if account["state"] == "ready"),
     )
 
 
@@ -292,7 +360,7 @@ async def create_job(request: Request):
         job, _created = await create_generation(svc, form, key if isinstance(key, str) else None)
     except ApiError as exc:
         flash(request, payload, "error", exc.message)
-        return back("/admin/jobs")
+        return back("/admin/create")
     finally:
         await form.close()
     return back(f"/admin/jobs/{job['id']}")
@@ -304,7 +372,9 @@ async def job_page(request: Request, job_id: str):
     job = services(request).db.get_job(job_id)
     if job is None:
         raise ApiError(404, "not_found", "generation not found")
-    return render(request, "job.html", payload, job=public_job(job, base="/admin/jobs", internal=True))
+    return render(
+        request, "job.html", payload, nav="jobs", job=public_job(job, base="/admin/jobs", internal=True), labels=labels(services(request))
+    )
 
 
 @router.get("/jobs/{job_id}/content")

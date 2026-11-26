@@ -1,25 +1,94 @@
 {% extends "base.html" %}
-{% from "_macros.html" import job_table, badge %}
+{% from "_macros.html" import icon, badge, tile, credits_cell, when, result_actions %}
 {% block title %}Overview · SDBF{% endblock %}
 {% block content %}
-<h1>Overview</h1>
+<header class="page-head">
+  <div>
+    <p class="eyebrow">Control room</p>
+    <h1>Overview</h1>
+    <p class="lede">{{ stats.accounts_ready }} of {{ stats.accounts_total }} accounts ready{% if stats.active or stats.queued %} · <span style="color: var(--cyan)">{{ stats.active }} rendering, {{ stats.queued }} queued</span>{% endif %}.</p>
+  </div>
+  <a class="button" href="/admin/create">{{ icon("create", 16) }} New generation</a>
+</header>
+
 {% for warning in warnings %}<p class="flash flash-warn">{{ warning }}</p>{% endfor %}
+
 <section class="stats" data-status-url="/admin/status.json">
-  <div class="stat"><span class="label">Available credits</span><span class="value" data-stat="credits">{{ stats.credits }}</span></div>
-  <div class="stat"><span class="label">Ready accounts</span><span class="value"><span data-stat="accounts_ready">{{ stats.accounts_ready }}</span><small> / <span data-stat="accounts_total">{{ stats.accounts_total }}</span></small></span></div>
-  <div class="stat"><span class="label">Active jobs</span><span class="value" data-stat="active">{{ stats.active }}</span></div>
-  <div class="stat"><span class="label">Queued</span><span class="value" data-stat="queued">{{ stats.queued }}</span></div>
-  <div class="stat"><span class="label">Succeeded</span><span class="value" data-stat="succeeded">{{ stats.succeeded }}</span></div>
-  <div class="stat"><span class="label">Failed</span><span class="value" data-stat="failed">{{ stats.failed }}</span></div>
+  <div class="card stat hero rise" style="--i: 0">
+    <span class="label">Credits available</span>
+    <span class="value" data-stat="credits">{{ stats.credits | thousands }}</span>
+    <div class="sub">Spent <b data-stat="spent_day">{{ stats.spent_day | thousands }}</b> in the last 24 h · <b data-stat="spent_week">{{ stats.spent_week | thousands }}</b> this week · <b>{{ stats.spent_total | thousands }}</b> all time</div>
+  </div>
+  <div class="card stat live-stat rise" style="--i: 1">
+    <span class="label">In progress</span>
+    <span class="value"><span data-stat="active">{{ stats.active }}</span><small> + <span data-stat="queued">{{ stats.queued }}</span> queued</small></span>
+    <div class="sub">rendering upstream right now</div>
+  </div>
+  <div class="card stat rise" style="--i: 2">
+    <span class="label">Generations</span>
+    <span class="value"><span data-stat="succeeded">{{ stats.succeeded }}</span><small> done</small></span>
+    <div class="sub"><b data-stat="failed">{{ stats.failed }}</b> failed</div>
+  </div>
 </section>
-<h2>Recent jobs</h2>
-{{ job_table(recent) }}
-{% if failures %}
-<h2>Recent failures</h2>
-<ul class="failures">
-  {% for job in failures %}
-  <li><a href="/admin/jobs/{{ job.id }}"><code>{{ job.id[:10] }}</code></a> <code>{{ job.error.code }}</code> <span class="muted">{{ job.error.message }}</span></li>
-  {% endfor %}
-</ul>
-{% endif %}
+
+<div class="split" style="margin-top: 1.25rem">
+  <section>
+    <h2>Latest generations <a class="count" href="/admin/jobs">view all →</a></h2>
+    {% if recent %}
+    <div class="gallery">
+      {% for job in recent %}
+      <article class="card shot rise" style="--i: {{ loop.index }}">
+        {{ tile(job) }}
+        <p class="gen-prompt"><a href="/admin/jobs/{{ job.id }}">{{ job.prompt }}</a></p>
+        <div class="gen-meta">
+          {{ badge(job.status) }}
+          <span>{{ job.model | model_label }}</span>
+          <span class="sep">{{ credits_cell(job) }}</span>
+        </div>
+        <div class="gen-meta">
+          <span>{{ labels.get(job.account_id, job.account_id) if job.account_id else "not assigned" }}</span>
+          <span class="sep">{{ when(job.created_at) }}</span>
+          <span class="btn-row" style="margin-left: auto">{{ result_actions(job) }}</span>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty-state"><p>No generations yet.</p><a class="button" href="/admin/create">Create the first one</a></div>
+    {% endif %}
+  </section>
+
+  <aside class="grid">
+    <h2>Accounts</h2>
+    <section class="card rise" style="--i: 3">
+      {% set top = (accounts | map(attribute="credits") | select | max) or 1 %}
+      <div class="bars">
+        {% for account in accounts %}
+        <div class="bar-row {{ 'off' if account.state != 'ready' }}">
+          <a class="who" href="/admin/jobs?account={{ account.id }}">{{ account.label }}</a>
+          <span class="num">{{ account.credits | thousands }}</span>
+          <div class="bar"><span style="width: {{ ((account.credits or 0) / top * 100) | round(1) }}%"></span></div>
+          <span class="faint" style="font-size: 0.78rem">{{ account.usage.jobs }} generations · {{ account.usage.credits_used | thousands }} credits spent</span>
+          {{ badge("logging_in" if account.logging_in else account.state) }}
+        </div>
+        {% else %}
+        <p class="muted" style="margin: 0">No accounts yet. <a href="/admin/accounts#add">Add one</a>.</p>
+        {% endfor %}
+      </div>
+    </section>
+    {% if failures %}
+    <h2>Recent failures</h2>
+    <section class="card rise" style="--i: 4">
+      <div class="bars">
+        {% for job in failures %}
+        <div>
+          <div class="gen-meta"><a class="mono" href="/admin/jobs/{{ job.id }}">{{ job.id[:10] }}</a><code style="color: var(--red)">{{ job.error.code }}</code><span class="sep">{{ when(job.finished_at) }}</span></div>
+          <div class="muted" style="font-size: 0.85rem">{{ job.error.message | truncate(120) }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+  </aside>
+</div>
 {% endblock %}

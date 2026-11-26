@@ -1,13 +1,18 @@
 {% extends "base.html" %}
+{% from "_macros.html" import brand %}
 {% block title %}Sign in · SDBF{% endblock %}
 {% block body %}
-<main class="login">
-  <form method="post" action="/admin/login" class="card stack">
-    <h1>SDBF</h1>
+<main class="gate">
+  <form method="post" action="/admin/login" class="card gate-card rise">
+    {{ brand() }}
+    <div>
+      <h1>Sign in</h1>
+      <p class="lede" style="margin-top: 0.3rem">The SDBF console is for operators only.</p>
+    </div>
     {% if disabled %}
-      <p class="flash flash-error">Admin login is disabled. Run <code>scripts/setup_admin.py</code> to set <code>ADMIN_PASSWORD_HASH</code>.</p>
+      <p class="flash flash-error" style="margin: 0">Admin login is disabled. Run <code>scripts/setup_admin.py</code> to set <code>ADMIN_PASSWORD_HASH</code>.</p>
     {% endif %}
-    {% if error %}<p class="flash flash-error" role="alert">{{ error }}</p>{% endif %}
+    {% if error %}<p class="flash flash-error" role="alert" style="margin: 0">{{ error }}</p>{% endif %}
     <label>Password
       <input type="password" name="password" autocomplete="current-password" required autofocus {% if disabled %}disabled{% endif %}>
     </label>

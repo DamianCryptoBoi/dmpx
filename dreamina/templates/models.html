@@ -1,25 +1,35 @@
 {% extends "base.html" %}
 {% block title %}Models · SDBF{% endblock %}
 {% block content %}
-<h1>Models</h1>
-<p class="muted">Prices are credits per second, {{ "read live at " ~ pricing_updated_at if pricing_source == "live" else "from the verified fallback table (live prices not fetched yet)" }}.</p>
-<div class="model-grid">
+<header class="page-head">
+  <div>
+    <p class="eyebrow">Catalog</p>
+    <h1>Models</h1>
+    <p class="lede">Prices are credits per second, {{ "read live at " ~ pricing_updated_at if pricing_source == "live" else "from the verified fallback table (live prices not fetched yet)" }}.</p>
+  </div>
+</header>
+<div class="model-cards">
 {% for model in models %}
-  <section class="card">
-    <h2>{{ model.name }}</h2>
-    <table>
-      <thead><tr><th>Resolution</th><th class="num">Per second</th><th class="num">4 s job</th></tr></thead>
-      <tbody>
-      {% for resolution, price in model.pricing_credits_per_second.items() %}
-        <tr><td>{{ resolution }}</td><td class="num">{{ price }}</td><td class="num">{{ price * 4 }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
+  <section class="card model-card grid rise" style="--i: {{ loop.index0 }}">
+    <div>
+      <h3>{{ model.name | model_label }}</h3>
+      <span class="mono faint" style="font-size: 0.78rem">{{ model.name }}</span>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Resolution</th><th class="num">Per second</th><th class="num">5 s</th><th class="num">10 s</th></tr></thead>
+        <tbody>
+        {% for resolution, price in model.pricing_credits_per_second.items() %}
+          <tr><td>{{ resolution }}</td><td class="num amber">{{ price }}</td><td class="num">{{ price * 5 }}</td><td class="num">{{ price * 10 if model.duration_seconds.max >= 10 else "—" }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
     <dl class="facts">
       <dt>Duration</dt><dd>{{ model.duration_seconds.min }}–{{ model.duration_seconds.max }} s</dd>
       <dt>Images</dt><dd>up to {{ model.reference_limits.images }}</dd>
       <dt>Audio</dt><dd>up to {{ model.reference_limits.audio }} · {{ model.reference_limits.audio_seconds }} s each</dd>
-      <dt>Prompt</dt><dd>{{ model.reference_limits.prompt_chars }} characters</dd>
+      <dt>Prompt</dt><dd>{{ model.reference_limits.prompt_chars | thousands }} characters</dd>
     </dl>
   </section>
 {% endfor %}

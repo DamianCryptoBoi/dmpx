@@ -381,3 +381,43 @@ def test_login_throttle_uses_client_ip_only_from_trusted_proxy(settings, service
     for forged in ("203.0.113.1", "203.0.113.2", "203.0.113.3", "203.0.113.4", "203.0.113.5"):
         attempts("10.0.0.9", forged, 1)
     assert "Too many" in attempts("10.0.0.9", "203.0.113.6", 1)[-1]
+
+
+# dashboard history -------------------------------------------------------------------
+def test_history_filters_and_credit_totals(app, services, dreamina):
+    # No `with`: the queue never starts, so seeded jobs keep their states.
+    client = TestClient(app, follow_redirects=False)
+    services.accounts.sync_from_env()
+    make_ready(services, "alpha")
+    first = post(client, key="k1").json()
+    second = post(client, key="k2", data={**FORM, "prompt": "@image1 second @audio1"}).json()
+    services.db.update_job(first["id"], status="succeeded", account_id="alpha", credits_used=84, output_url="https://cdn/a.mp4", finished_at="2026-01-01T00:00:00+00:00")
+    services.db.update_job(second["id"], status="failed", account_id="beta", credits_used=0, error_code="upstream_rejected", error_message="refused")
+    login(client)
+    usage = services.db.account_usage()
+    assert usage["alpha"]["credits_used"] == 84 and usage["alpha"]["succeeded"] == 1 and usage["beta"]["failed"] == 1
+    assert services.db.credits_used(account_id="alpha") == 84 and services.db.credits_used(account_id="beta") == 0
+
+    page = client.get("/admin/jobs?account=alpha").text
+    assert first["id"] in page and second["id"] not in page
+    assert f"/admin/jobs/{first['id']}/content" in page  # result link
+    assert ">84<" in page.replace(" ", "")  # credits charged for the filter
+
+    failed = client.get("/admin/jobs?status=failed").text
+    assert second["id"] in failed and first["id"] not in failed
+
+    detail = client.get(f"/admin/jobs/{first['id']}").text
+    assert f"/admin/jobs/{first['id']}/content" in detail and f"/v1/generations/{first['id']}/content" in detail
+    assert "alpha" in detail
+
+    accounts = client.get("/admin/accounts").text
+    assert ">Spent<" in accounts
+
+
+def test_create_page_offers_every_model_with_prices(client, services):
+    login(client)
+    page = client.get("/admin/create")
+    assert page.status_code == 200
+    for name in ("seedance-2.5-flash", "seedance-2.0-mini"):
+        assert f'value="{name}"' in page.text
+    assert 'id="catalog"' in page.text and 'name="csrf"' in page.text

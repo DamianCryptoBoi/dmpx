@@ -1,40 +1,56 @@
 {% extends "base.html" %}
-{% from "_macros.html" import badge %}
-{% block title %}Job {{ job.id[:10] }} · SDBF{% endblock %}
+{% from "_macros.html" import icon, badge, tile, credits_cell, when, result_actions %}
+{% block title %}Generation {{ job.id[:10] }} · SDBF{% endblock %}
 {% block content %}
-<p><a href="/admin/jobs">← Jobs</a></p>
-<h1>Job <code>{{ job.id }}</code> {{ badge(job.status) }}</h1>
+<p style="margin: 0 0 1rem"><a class="button quiet sm" href="/admin/jobs">{{ icon("arrow-left", 16) }} Generations</a></p>
+<header class="page-head">
+  <div>
+    <p class="eyebrow">Generation</p>
+    <h1 style="display: flex; gap: 0.8rem; align-items: center; flex-wrap: wrap"><span class="mono" style="font-size: 0.7em">{{ job.id }}</span> {{ badge(job.status) }}</h1>
+  </div>
+</header>
 <div {% if job.status in ["queued", "submitting", "running"] or job.media == "pending" %}data-refresh-seconds="10"{% endif %}></div>
-{% if job.error %}<p class="flash flash-error"><code>{{ job.error.code }}</code> {{ job.error.message }}</p>{% endif %}
-{% if job.notes %}<p class="flash flash-warn">{{ job.notes }}</p>{% endif %}
-<div class="detail">
-  <section class="card">
+{% if job.error %}<div class="flash flash-error"><code>{{ job.error.code }}</code><span>{{ job.error.message }}</span></div>{% endif %}
+{% if job.notes %}<div class="flash flash-warn">{{ job.notes }}</div>{% endif %}
+
+<div class="split">
+  <div class="grid">
     {% if job.media == "ready" %}
-      <video controls preload="metadata" src="{{ job.content_url }}"></video>
-      <p><a href="{{ job.content_url }}" download>Download MP4</a></p>
-    {% elif job.media == "expired" %}
-      <p class="muted">The video is no longer available.</p>
-    {% elif job.media == "pending" %}
-      <p class="muted">Generation finished; the video link is not available yet.</p>
+      <div class="player rise"><video controls preload="metadata" src="{{ job.content_url }}"></video></div>
+      <section class="card rise" style="--i: 1">
+        <h3 class="card-title">Result link</h3>
+        <div class="btn-row">{{ result_actions(job, small=false) }}</div>
+        <div class="linkbox">
+          <input readonly data-absolute="{{ job.content_url }}" value="{{ job.content_url }}" aria-label="Video link (needs this dashboard's login)">
+        </div>
+        <p class="hint" style="margin: 0.6rem 0 0">Opens while you're signed in here. Your Worker fetches the same video from <code>/v1/generations/{{ job.id }}/content</code> with the API key. Videos stream from the generation service and aren't stored on this server.</p>
+      </section>
     {% else %}
-      <p class="muted">No video yet.</p>
+      {{ tile(job, "player") }}
     {% endif %}
-  </section>
-  <section class="card">
+    <section class="card rise" style="--i: 2">
+      <h3 class="card-title">Prompt</h3>
+      <p class="prompt-block">{{ job.prompt }}</p>
+    </section>
+  </div>
+
+  <aside class="card rise" style="--i: 1">
+    <h3 class="card-title">Details</h3>
     <dl class="facts">
-      <dt>Model</dt><dd>{{ job.model }}</dd>
-      <dt>Mode</dt><dd>{{ "First / last frame" if job.mode == "first_last" else "Unified references" }}</dd>
-      <dt>Settings</dt><dd>{{ job.duration_seconds }}s · {{ job.resolution }} · {{ job.aspect_ratio }}</dd>
-      <dt>References</dt><dd>{{ job.references.images }} images · {{ job.references.audio }} audio{% if job.references.first_frame %} · first frame{% endif %}{% if job.references.last_frame %} · last frame{% endif %}</dd>
-      <dt>Account</dt><dd>{{ job.account_id or "—" }}</dd>
-      <dt>Credits</dt><dd>{{ job.credits_used if job.credits_used is not none else "—" }} used · {{ job.credits_estimate }} estimated</dd>
-      <dt>Submit id</dt><dd><code>{{ job.submit_id or "—" }}</code></dd>
-      <dt>Created</dt><dd>{% if job.created_at %}<time datetime="{{ job.created_at }}">{{ job.created_at }}</time>{% else %}—{% endif %}</dd>
-      <dt>Started</dt><dd>{% if job.started_at %}<time datetime="{{ job.started_at }}">{{ job.started_at }}</time>{% else %}—{% endif %}</dd>
-      <dt>Finished</dt><dd>{% if job.finished_at %}<time datetime="{{ job.finished_at }}">{{ job.finished_at }}</time>{% else %}—{% endif %}</dd>
+      <dt>Account</dt>
+      <dd>{% if job.account_id %}<a href="/admin/jobs?account={{ job.account_id }}">{{ labels.get(job.account_id, job.account_id) }}</a> <span class="mono faint">{{ job.account_id }}</span>{% else %}<span class="faint">not assigned yet</span>{% endif %}</dd>
+      <dt>Credits</dt>
+      <dd>{{ credits_cell(job) }}{% if job.credits_used is not none and job.credits_estimate and job.credits_estimate != job.credits_used %} <span class="faint">· estimated {{ job.credits_estimate }}</span>{% endif %}</dd>
+      <dt>Model</dt><dd>{{ job.model | model_label }}</dd>
+      <dt>Mode</dt><dd>{{ "First / last frame" if job.mode == "first_last" else "References" }}</dd>
+      <dt>Settings</dt><dd class="mono">{{ job.duration_seconds }}s · {{ job.resolution }} · {{ job.aspect_ratio }}</dd>
+      <dt>References</dt>
+      <dd>{{ job.references.images }} image{{ "" if job.references.images == 1 else "s" }} · {{ job.references.audio }} audio{% if job.references.first_frame %} · first frame{% endif %}{% if job.references.last_frame %} · last frame{% endif %}</dd>
+      <dt>Created</dt><dd>{{ when(job.created_at) }}</dd>
+      <dt>Started</dt><dd>{{ when(job.started_at) }}</dd>
+      <dt>Finished</dt><dd>{{ when(job.finished_at) }}{% if job.started_at and job.finished_at %} <span class="faint" data-elapsed-from="{{ job.started_at }}" data-elapsed-to="{{ job.finished_at }}"></span>{% endif %}</dd>
+      <dt>Submit id</dt><dd class="mono">{{ job.submit_id or "—" }}</dd>
     </dl>
-  </section>
+  </aside>
 </div>
-<h2>Prompt</h2>
-<pre class="prompt">{{ job.prompt }}</pre>
 {% endblock %}
